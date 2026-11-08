@@ -1,0 +1,7 @@
+[package]
+name = "kitvr-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kitvr-core = { path = "../core" }
