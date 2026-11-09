@@ -1,6 +1,0 @@
-[package]
-name = "kitvr-proto"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

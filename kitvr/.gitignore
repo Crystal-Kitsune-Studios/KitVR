@@ -1,6 +1,0 @@
-/target
-*.log
-quest/**/build/
-quest/**/.cxx/
-quest/**/.gradle/
-local.properties

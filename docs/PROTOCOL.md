@@ -21,7 +21,8 @@ The server advertises `_kitvr._tcp.local.` on the control port with TXT records
 1. Client opens a TCP connection to the control port.
 2. Both sides send `Hello`. If `version` differs, the side that cannot support the other's
    version sends `Bye` and closes.
-3. Server sends `StreamConfig` (codec, resolution, fps, starting bitrate).
+3. Server sends `StreamConfig` (codec, resolution, fps, starting bitrate) and, if audio is
+   enabled, `AudioConfig`.
 4. Client configures its decoder, then starts sending tracking packets by UDP to the server's
    media port. The server learns the client's UDP address from the first packet and sends
    video there. This avoids any need for the client to announce its port.
@@ -29,6 +30,10 @@ The server advertises `_kitvr._tcp.local.` on the control port with TXT records
 6. On packet loss that it cannot hide, the client sends `KeyframeRequest`.
    If throughput is poor, it sends `BitrateRequest`.
 7. Either side ends with `Bye`.
+
+Joining a stream: the client discards frames until it receives one flagged as a keyframe, and
+resets its reassembly state every time it receives a new server `Hello`, because frame ids
+restart from 0 on a new session.
 
 ## Control messages (implemented)
 
@@ -44,6 +49,7 @@ Maximum length is 65536. A decoder that sees `Truncated` should read more bytes 
 | 5 | Ping | `u64 ts_us` |
 | 6 | Pong | `u64 ts_us` (echo of the Ping value) |
 | 7 | Bye | empty |
+| 8 | AudioConfig | `u32 sample_rate`, `u8 channels` (PC to headset, 0 = none), `u16 frame_samples` (per channel, per packet), `u8 mic_channels` (headset to PC, 0 = none) |
 
 ## Video packets (implemented)
 
@@ -75,7 +81,26 @@ Design notes:
 - **Loss handling (v1).** If any packet of a slice is missing when the next frame's packets
   begin to arrive, the client drops that frame and sends `KeyframeRequest`. FEC is a later addition.
 
-## Tracking packets (draft, not yet implemented)
+## Audio packets (implemented)
+
+16-byte header followed by `payload_len` bytes of signed 16-bit little-endian PCM, interleaved.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | type: 3 = audio to the headset, 4 = microphone to the PC |
+| 1 | u8 | flags, 0 (bit 0 is reserved for Opus) |
+| 2 | u16 | seq |
+| 4 | u64 | timestamp_us (sender's monotonic clock) |
+| 12 | u16 | payload_len |
+| 14 | u16 | reserved, 0 |
+
+Version 1 uses 48 kHz. PC audio is stereo in 240-sample (5 ms) packets. Microphone audio is mono
+in 480-sample (10 ms) packets. The receiver keeps a small jitter buffer (about 30 ms), starts
+playing once it is filled, and drops the oldest audio if it grows past about 80 ms. The server
+converts whatever format the chosen PC device uses to 48 kHz stereo. PCM costs about 1.5 Mbps
+downstream, which is small next to the video stream. Opus can replace it later using the flag bit.
+
+## Tracking packets (implemented)
 
 Client to server, UDP, sent every display frame (72 to 120 Hz). 136 bytes.
 
@@ -92,8 +117,8 @@ Client to server, UDP, sent every display frame (72 to 120 Hz). 136 bytes.
 Hand block: `u16 buttons`, `u16 flags` (bit0 = active), `f32 trigger`, `f32 grip`,
 `f32 stick_x`, `f32 stick_y`, then pose as above (28 bytes).
 
-Desktop-mode pointer input will be a separate message type once the controller-ray mapping
-is decided.
+The current client fills in the head pose and sends both hands as inactive. Desktop-mode
+pointer input will be a separate message type once the controller-ray mapping is decided.
 
 ## Security
 
