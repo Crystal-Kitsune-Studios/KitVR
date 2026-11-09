@@ -1,6 +1,6 @@
 # Quest client
 
-Native Android app (C++ via the NDK, no Java) using OpenXR. One APK for Quest 2, 3 and 3S.
+Android app (Java launcher and C++ via the NDK) using OpenXR. One APK for Quest 2, 3 and 3S.
 
 ## How it works
 
@@ -18,6 +18,8 @@ Native Android app (C++ via the NDK, no Java) using OpenXR. One APK for Quest 2,
 ```
 app/src/main/
   AndroidManifest.xml
+  java/com/crystalkitsune/kitvr/MainActivity.java  launcher UI, host setting, release updates
+  res/xml/file_paths.xml                         secure APK sharing for installation
   cpp/
     main.cpp      OpenXR setup, event loop, quad layer
     session.*     control channel, UDP receive, frame reassembly, keyframe requests
@@ -30,7 +32,8 @@ app/src/main/
 
 You need Android Studio (or the Android SDK, NDK and CMake 3.22 from the SDK manager) and JDK 17.
 
-Open the `quest/` folder in Android Studio and let it sync, or from a shell:
+Open the `quest/` folder in Android Studio and let it sync, or from a shell with the Android SDK,
+NDK and CMake installed:
 
 ```
 gradle wrapper --gradle-version 8.7     # one time, creates gradlew
@@ -45,17 +48,22 @@ The application id is `com.crystalkitsune.kitvr`. Change it in `app/build.gradle
 
 1. Enable developer mode on the headset and connect adb (`adb connect <quest-ip>:5555`).
 2. Install: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
-3. Tell the app where the PC is, either way:
-   - launch with an extra:
-     `adb shell am start -n com.crystalkitsune.kitvr/android.app.NativeActivity --es host 192.168.1.50`
-   - or put the address in a file so you can launch from the Quest library:
-     `adb shell mkdir -p /sdcard/Android/data/com.crystalkitsune.kitvr/files`
-     `adb shell "echo 192.168.1.50 > /sdcard/Android/data/com.crystalkitsune.kitvr/files/host.txt"`
+3. Launch KitVR from the Quest library, enter your PC's IP address, and select **Connect**. The
+   address is saved for the next launch. You can also launch the immersive client directly with an
+   extra: `adb shell am start -n com.crystalkitsune.kitvr/android.app.NativeActivity --es host 192.168.1.50`
+   For direct native launches without an extra, put the address in a file:
+   `adb shell mkdir -p /sdcard/Android/data/com.crystalkitsune.kitvr/files`
+   `adb shell "echo 192.168.1.50 > /sdcard/Android/data/com.crystalkitsune.kitvr/files/host.txt"`
 4. Logs: `adb logcat -s kitvr`
+
+The launcher checks the latest stable GitHub release on startup. When an update is available, choose
+**Download and install**; Android may ask you to allow installs from KitVR and always asks you to
+confirm the installation. Updates require a signed release APK from the same signing key as the
+installed app.
 
 ## Things to check first if it does not work
 
-This code was written without being able to build it, so expect to fix small things.
+The client has not been verified on Quest hardware; expect device-specific issues on first run.
 
 - **Swapchain creation fails.** `setupVideo()` sets `usageFlags` to color attachment plus sampled.
   If the runtime rejects it, try `0` or only `XR_SWAPCHAIN_USAGE_SAMPLED_BIT`. The spec requires
