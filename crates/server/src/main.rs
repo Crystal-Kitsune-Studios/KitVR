@@ -15,6 +15,8 @@ use kitvr_core::proto::control::{decode_message, encode_message, Codec, Message}
 use kitvr_core::proto::tracking::{Tracking, PACKET_TYPE_TRACKING};
 use kitvr_core::proto::{DecodeError, CONTROL_PORT, MEDIA_PORT, PROTOCOL_VERSION};
 
+const STEAMVR_TRACKING_PORT: u16 = 9945;
+
 const USAGE: &str = "\
 kitvr-server [options]
 
@@ -133,6 +135,7 @@ fn handle_control(
                 if buf[0] == PACKET_TYPE_TRACKING {
                     if let Ok(t) = Tracking::parse(&buf[..n]) {
                         pose_ts.store(t.timestamp_us, Ordering::Relaxed);
+                        let _ = udp.send_to(&buf[..n], ("127.0.0.1", STEAMVR_TRACKING_PORT));
                         let mut c = client.lock().unwrap();
                         if *c != Some(from) {
                             println!("client media address: {from}");

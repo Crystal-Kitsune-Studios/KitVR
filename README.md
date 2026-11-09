@@ -59,6 +59,24 @@ GitHub Actions packages Windows as `KitVR-windows-x86_64.zip` (desktop and serve
 together) and Linux as `KitVR-linux-x86_64.AppImage`. Both packages still require FFmpeg installed
 on the PC; the AppImage bundles the GUI and KitVR server, not FFmpeg.
 
+SteamVR builds also publish a separate `KitVR-steamvr-driver-windows-x86_64.zip` or
+`KitVR-steamvr-driver-linux-x86_64.tar.gz`. This experimental HMD driver registers the headset and
+forwards Quest head poses into SteamVR over loopback UDP port 9945. It does not yet capture and
+stream SteamVR's stereo eye images, or expose controller input, so it is a tracking prototype and
+not yet a complete SteamVR streaming mode.
+
+Build the tracking prototype locally with CMake 3.22 or newer:
+
+```
+cmake -S steamvr -B steamvr/build
+cmake --build steamvr/build --config Release
+cmake --install steamvr/build --prefix steamvr/package
+```
+
+The OpenVR 2.15.6 driver header is fetched and checksum-verified at configure time. Register the
+installed `steamvr/package/kitvr` directory with SteamVR's `vrpathreg adddriver` command. Remove it
+with `vrpathreg removedriver` and the same path.
+
 ## Audio
 
 PC audio plays in the headset, and the headset microphone can be sent back to the PC.

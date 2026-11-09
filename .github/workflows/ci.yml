@@ -81,6 +81,12 @@ jobs:
       - name: Build desktop app and server
         run: cargo build --release --locked -p kitvr-desktop -p kitvr-server
 
+      - name: Build and install SteamVR driver
+        run: |
+          cmake -S steamvr -B steamvr/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build steamvr/build --config Release
+          cmake --install steamvr/build --prefix steamvr/package
+
       - name: Package Windows app
         if: runner.os == 'Windows'
         shell: pwsh
@@ -90,6 +96,7 @@ jobs:
           Copy-Item target/release/kitvr-server.exe package/
           Copy-Item README.md package/
           Compress-Archive -Path package/* -DestinationPath KitVR-windows-x86_64.zip
+          Compress-Archive -Path steamvr/package/kitvr -DestinationPath KitVR-steamvr-driver-windows-x86_64.zip
 
       - name: Package Linux AppImage
         if: runner.os == 'Linux'
@@ -103,12 +110,15 @@ jobs:
           chmod +x linuxdeploy.AppImage
           ./linuxdeploy.AppImage --appimage-extract-and-run --appdir AppDir --desktop-file AppDir/usr/share/applications/kitvr.desktop --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/kitvr.png --executable AppDir/usr/bin/kitvr-desktop --executable AppDir/usr/bin/kitvr-server --output appimage
           mv KitVR-x86_64.AppImage KitVR-linux-x86_64.AppImage
+          tar -C steamvr/package -czf KitVR-steamvr-driver-linux-x86_64.tar.gz kitvr
 
       - name: Upload desktop package
         uses: actions/upload-artifact@v4
         with:
           name: kitvr-desktop-${{ matrix.platform }}
-          path: KitVR-${{ matrix.platform }}.*
+          path: |
+            KitVR-${{ matrix.platform }}.*
+            KitVR-steamvr-driver-${{ matrix.platform }}.*
           if-no-files-found: error
 
   release-apk:
@@ -171,3 +181,4 @@ jobs:
             quest/app/build/outputs/apk/release/app-release.apk
             release-assets/*.zip
             release-assets/*.AppImage
+            release-assets/*.tar.gz

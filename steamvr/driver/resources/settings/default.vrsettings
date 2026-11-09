@@ -1,0 +1,8 @@
+{
+  "driver_kitvr": {
+    "serialNumber": "KITVR-HMD-001",
+    "modelNumber": "KitVR Streamed HMD",
+    "displayFrequency": 90.0,
+    "ipd": 0.064
+  }
+}

@@ -1,4 +1,5 @@
 /target
+/steamvr/build/
 *.log
 quest/**/build/
 quest/**/.cxx/
