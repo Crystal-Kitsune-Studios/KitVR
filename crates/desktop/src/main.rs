@@ -17,6 +17,9 @@ const ENCODERS: &[&str] = if cfg!(windows) {
 };
 const RESOLUTIONS: &[&str] = &["1920x1080", "2560x1440", "1280x720"];
 const FRAME_RATES: &[u32] = &[60, 72, 90];
+const RELEASE_API: &str =
+    "https://api.github.com/repos/Crystal-Kitsune-Studios/KitVR/releases/latest";
+const WELCOME_STORAGE_KEY: &str = "kitvr.desktop.welcome_completed";
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -49,6 +52,23 @@ struct KitVrApp {
     log_rx: Receiver<String>,
     logs: VecDeque<String>,
     status: String,
+    tutorial_open: bool,
+    tutorial_completed: bool,
+    tutorial_step: usize,
+    update_rx: Receiver<ReleaseCheck>,
+    update_offer: Option<UpdateOffer>,
+    update_message: String,
+}
+
+struct UpdateOffer {
+    version: String,
+    url: String,
+}
+
+enum ReleaseCheck {
+    Current(String),
+    Available(UpdateOffer),
+    Failed(String),
 }
 
 impl KitVrApp {
@@ -65,7 +85,12 @@ impl KitVrApp {
         cc.egui_ctx.set_visuals(visuals);
 
         let (log_tx, log_rx) = mpsc::channel();
-        Self {
+        let (update_tx, update_rx) = mpsc::channel();
+        let tutorial_completed = cc
+            .storage
+            .and_then(|storage| storage.get_string(WELCOME_STORAGE_KEY))
+            .is_some_and(|value| value == "true");
+        let app = Self {
             host_ip: local_ip(),
             source: "Test pattern".to_string(),
             file_path: String::new(),
@@ -82,7 +107,17 @@ impl KitVrApp {
             log_rx,
             logs: VecDeque::new(),
             status: "Ready. Start KitVR Server, then connect from your Quest.".to_string(),
-        }
+            tutorial_open: !tutorial_completed,
+            tutorial_completed,
+            tutorial_step: 0,
+            update_rx,
+            update_offer: None,
+            update_message: "Checking for updates...".to_string(),
+        };
+        thread::spawn(move || {
+            let _ = update_tx.send(check_latest_release());
+        });
+        app
     }
 
     fn push_log(&mut self, line: impl Into<String>) {
@@ -229,10 +264,49 @@ impl KitVrApp {
             self.status = message.clone();
             self.push_log(message);
         }
+        while let Ok(result) = self.update_rx.try_recv() {
+            match result {
+                ReleaseCheck::Current(version) => {
+                    self.update_message = format!("Up to date · v{version}");
+                    self.update_offer = None;
+                }
+                ReleaseCheck::Available(offer) => {
+                    self.update_message = format!("Update available · v{}", offer.version);
+                    self.update_offer = Some(offer);
+                }
+                ReleaseCheck::Failed(message) => {
+                    self.update_message = message;
+                    self.update_offer = None;
+                }
+            }
+        }
+    }
+
+    fn open_update(&mut self) {
+        let Some(offer) = self.update_offer.as_ref() else {
+            return;
+        };
+        match webbrowser::open(&offer.url) {
+            Ok(()) => {
+                self.status = format!("Opened KitVR v{} download in your browser.", offer.version);
+            }
+            Err(error) => {
+                self.status = format!("Could not open the update page: {error}");
+            }
+        }
+    }
+
+    fn close_tutorial(&mut self) {
+        self.tutorial_open = false;
+        self.tutorial_completed = true;
     }
 }
 
 impl eframe::App for KitVrApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(WELCOME_STORAGE_KEY, self.tutorial_completed.to_string());
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_server();
         ctx.request_repaint_after(Duration::from_millis(150));
@@ -249,12 +323,36 @@ impl eframe::App for KitVrApp {
                                 .color(Color32::WHITE),
                         );
                         ui.label(
-                            RichText::new("PC STREAMING CONSOLE")
+                            RichText::new(format!("PC STREAMING CONSOLE  ·  v{}", app_version()))
                                 .size(11.0)
                                 .color(muted()),
                         );
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(version) = self
+                            .update_offer
+                            .as_ref()
+                            .map(|offer| offer.version.clone())
+                        {
+                            if ui.small_button("Get update").clicked() {
+                                self.open_update();
+                            }
+                            ui.label(
+                                RichText::new(format!("Update · v{version}"))
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(124, 220, 174)),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new(&self.update_message)
+                                    .size(11.0)
+                                    .color(muted()),
+                            );
+                        }
+                        if ui.small_button("Tutorial").clicked() {
+                            self.tutorial_open = true;
+                            self.tutorial_step = 0;
+                        }
                         let (dot, text) = if self.child.is_some() {
                             (Color32::from_rgb(124, 220, 174), "SERVER RUNNING")
                         } else {
@@ -289,10 +387,87 @@ impl eframe::App for KitVrApp {
                     self.logs_panel(&mut columns[1]);
                 });
             });
+
+        if self.tutorial_open {
+            self.tutorial_window(ctx);
+        }
     }
 }
 
 impl KitVrApp {
+    fn tutorial_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.tutorial_open;
+        egui::Window::new("Welcome to KitVR")
+            .id(egui::Id::new("kitvr_welcome"))
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_width(520.0);
+                ui.label(
+                    RichText::new(format!("Getting started  ·  {}/3", self.tutorial_step + 1))
+                        .size(11.0)
+                        .strong()
+                        .color(Color32::from_rgb(124, 220, 174)),
+                );
+                ui.add_space(10.0);
+                match self.tutorial_step {
+                    0 => {
+                        ui.heading("Your PC, in your Quest");
+                        ui.add_space(8.0);
+                        ui.label("KitVR sends your PC's video and audio to the headset over your local network.");
+                        ui.add_space(12.0);
+                        ui.label("You'll need FFmpeg on the PC, and both devices on the same network.");
+                    }
+                    1 => {
+                        ui.heading("Prepare the PC");
+                        ui.add_space(8.0);
+                        ui.label("Install FFmpeg and allow KitVR through your firewall on TCP 9943 and UDP 9944.");
+                        ui.add_space(8.0);
+                        ui.label("For a first test, keep Test pattern and the default software encoder selected.");
+                    }
+                    _ => {
+                        ui.heading("Connect the Quest");
+                        ui.add_space(8.0);
+                        ui.label(format!("On the Quest, open KitVR and enter this PC address: {}", self.host_ip));
+                        ui.add_space(8.0);
+                        ui.label("Start the server here, then press Connect in the headset app.");
+                    }
+                }
+                ui.add_space(20.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if self.tutorial_step > 0 && ui.button("Back").clicked() {
+                        self.tutorial_step -= 1;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.tutorial_step < 2 {
+                            if ui.button("Next").clicked() {
+                                self.tutorial_step += 1;
+                            }
+                            if ui.button("Skip").clicked() {
+                                self.close_tutorial();
+                            }
+                        } else {
+                            if ui.button("Start test stream").clicked() {
+                                self.source = "Test pattern".to_string();
+                                self.close_tutorial();
+                                self.start_server();
+                            }
+                            if ui.button("Done").clicked() {
+                                self.close_tutorial();
+                            }
+                        }
+                    });
+                });
+            });
+        self.tutorial_open = open && self.tutorial_open;
+        if !self.tutorial_open {
+            self.tutorial_completed = true;
+        }
+    }
+
     fn settings_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading(RichText::new("Stream setup").size(19.0));
         ui.add_space(10.0);
@@ -563,4 +738,107 @@ fn field_label(ui: &mut egui::Ui, text: &str) {
 
 fn muted() -> Color32 {
     Color32::from_rgb(153, 170, 165)
+}
+
+fn app_version() -> String {
+    let version = option_env!("KITVR_DESKTOP_VERSION")
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+        .trim_start_matches('v');
+    if parse_version(version).is_some() {
+        version.to_string()
+    } else {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+}
+
+fn parse_version(version: &str) -> Option<[u64; 3]> {
+    let mut parts = version.split('.');
+    let parsed = [
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ];
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn is_newer_version(latest: &str, current: &str) -> bool {
+    match (parse_version(latest), parse_version(current)) {
+        (Some(latest), Some(current)) => latest > current,
+        _ => false,
+    }
+}
+
+fn check_latest_release() -> ReleaseCheck {
+    let current_version = app_version();
+    let response = match ureq::get(RELEASE_API)
+        .set("Accept", "application/vnd.github+json")
+        .set("User-Agent", "KitVR-Desktop")
+        .call()
+    {
+        Ok(response) => response,
+        Err(_) => return ReleaseCheck::Failed("Update check unavailable".to_string()),
+    };
+    let release: serde_json::Value = match response.into_json() {
+        Ok(release) => release,
+        Err(_) => return ReleaseCheck::Failed("Could not read the latest release".to_string()),
+    };
+
+    let Some(tag) = release.get("tag_name").and_then(|value| value.as_str()) else {
+        return ReleaseCheck::Failed("Could not read the latest release".to_string());
+    };
+    let latest_version = tag.trim_start_matches('v');
+    if parse_version(latest_version).is_none() {
+        return ReleaseCheck::Failed("Latest release has an invalid version".to_string());
+    }
+    if parse_version(&current_version).is_none() {
+        return ReleaseCheck::Failed("Installed version is invalid".to_string());
+    }
+    if !is_newer_version(latest_version, &current_version) {
+        return ReleaseCheck::Current(current_version);
+    }
+
+    let asset_name = if cfg!(windows) {
+        "KitVR-windows-x86_64.zip"
+    } else {
+        "KitVR-linux-x86_64.AppImage"
+    };
+    let asset_url = release
+        .get("assets")
+        .and_then(|assets| assets.as_array())
+        .and_then(|assets| {
+            assets.iter().find_map(|asset| {
+                (asset.get("name")?.as_str()? == asset_name)
+                    .then(|| asset.get("browser_download_url")?.as_str())
+                    .flatten()
+            })
+        });
+    let url = asset_url
+        .or_else(|| release.get("html_url").and_then(|value| value.as_str()))
+        .unwrap_or("https://github.com/Crystal-Kitsune-Studios/KitVR/releases/latest");
+    ReleaseCheck::Available(UpdateOffer {
+        version: latest_version.to_string(),
+        url: url.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_newer_version, parse_version};
+
+    #[test]
+    fn parses_three_part_versions() {
+        assert_eq!(parse_version("0.1.4"), Some([0, 1, 4]));
+        assert_eq!(parse_version("v1.2.3"), None);
+        assert_eq!(parse_version("1.2"), None);
+    }
+
+    #[test]
+    fn compares_versions_numerically() {
+        assert!(is_newer_version("0.1.10", "0.1.9"));
+        assert!(!is_newer_version("0.1.4", "0.1.4"));
+        assert!(!is_newer_version("main", "0.1.4"));
+    }
 }

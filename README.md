@@ -53,7 +53,14 @@ cargo build --release -p kitvr-desktop -p kitvr-server
 Run `target/release/kitvr-desktop` (or `kitvr-desktop.exe` on Windows). Choose a source and
 encoder, then start streaming; the GUI displays the PC address to enter in the Quest app and shows
 server output. FFmpeg must be installed and available on `PATH` (or set `KITVR_FFMPEG`). The
-existing `kitvr-server` command-line workflow remains available without the GUI.
+existing `kitvr-server` command-line workflow remains available without the GUI. On first launch,
+the app walks through PC setup, network requirements, and connecting from the Quest; open **Tutorial**
+in the header to revisit it.
+
+The desktop app checks GitHub Releases on startup and offers the latest platform package when it
+finds a newer version. Updates download through your browser and require a manual install: close the
+app before replacing the Windows executables, or mark the downloaded Linux AppImage executable
+before launching it.
 
 GitHub Actions packages Windows as `KitVR-windows-x86_64.zip` (desktop and server executables
 together) and Linux as `KitVR-linux-x86_64.AppImage`. Both packages still require FFmpeg installed

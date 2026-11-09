@@ -79,6 +79,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libxcb-shape0-dev libxcb-xfixes0-dev librsvg2-bin
 
       - name: Build desktop app and server
+        env:
+          KITVR_DESKTOP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: cargo build --release --locked -p kitvr-desktop -p kitvr-server
 
       - name: Build and install SteamVR driver
