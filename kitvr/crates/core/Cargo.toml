@@ -1,0 +1,7 @@
+[package]
+name = "kitvr-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kitvr-proto = { path = "../proto" }
