@@ -14,7 +14,7 @@ android {
     defaultConfig {
         applicationId = "com.crystalkitsune.kitvr"
         minSdk = 29
-        targetSdk = 32
+        targetSdk = 33
         versionCode = 1
         versionName = "0.1.0"
 
