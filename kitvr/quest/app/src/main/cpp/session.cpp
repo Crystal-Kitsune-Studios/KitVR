@@ -83,6 +83,13 @@ bool Session::handleMessage(const Message& m) {
             pendingCfg_ = m.cfg;
             break;
         }
+        case kAudioConfig: {
+            LOGI("audio config: %u Hz, %u ch to headset, %u ch microphone", m.audio.sampleRate,
+                 m.audio.channels, m.audio.micChannels);
+            std::lock_guard<std::mutex> lk(cfgMutex_);
+            audioCfg_ = m.audio;
+            break;
+        }
         case kPong: {
             static int count = 0;
             if (++count % 10 == 0) {
@@ -180,6 +187,7 @@ bool Session::startMedia(const StreamConfig& cfg, ANativeWindow* window) {
 }
 
 void Session::stopMedia() {
+    audio_.stop();
     if (!mediaRunning_) return;
     mediaStop_ = true;
     if (mediaThread_.joinable()) mediaThread_.join();
@@ -189,6 +197,39 @@ void Session::stopMedia() {
         udpFd_ = -1;
     }
     mediaRunning_ = false;
+}
+
+bool Session::wantsMic() {
+    std::lock_guard<std::mutex> lk(cfgMutex_);
+    return audioCfg_ && audioCfg_->micChannels > 0;
+}
+
+void Session::tick() {
+    if (!mediaRunning_) return;
+    uint64_t now = nowUs();
+    if (now - lastAudioTryUs_ < 1000000) return;  // retry failed starts once a second
+    std::optional<AudioConfig> cfg;
+    {
+        std::lock_guard<std::mutex> lk(cfgMutex_);
+        cfg = audioCfg_;
+    }
+    if (!cfg) return;
+    bool failed = false;
+    if (cfg->channels > 0 && !audio_.playbackRunning()) {
+        failed |= !audio_.startPlayback(static_cast<int>(cfg->sampleRate), cfg->channels);
+    }
+    if (cfg->micChannels > 0 && micAllowed_ && !audio_.captureRunning()) {
+        failed |= !audio_.startCapture(static_cast<int>(cfg->sampleRate),
+                                       [this](const int16_t* s, size_t n) { onMicFrame(s, n); });
+    }
+    if (failed) lastAudioTryUs_ = now;
+}
+
+void Session::onMicFrame(const int16_t* samples, size_t count) {
+    if (!mediaRunning_ || udpFd_ < 0) return;
+    static thread_local std::vector<uint8_t> pkt;  // reused so the audio thread does not allocate
+    encodeAudioUp(pkt, micSeq_++, nowUs(), samples, count);
+    send(udpFd_, pkt.data(), pkt.size(), 0);
 }
 
 void Session::sendTracking(uint64_t tsUs, const float head[7]) {
@@ -234,6 +275,15 @@ void Session::mediaLoop() {
             seenEpoch = epoch_;
             haveCur = false;
             waitingForKey = true;
+        }
+
+        if (buf[0] == kPacketAudioDown) {
+            const uint8_t* audioPayload = nullptr;
+            size_t audioLen = 0;
+            if (parseAudioDown(buf.data(), static_cast<size_t>(n), audioPayload, audioLen)) {
+                audio_.pushPlayback(reinterpret_cast<const int16_t*>(audioPayload), audioLen / 2);
+            }
+            continue;
         }
 
         VideoHeader h;

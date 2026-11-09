@@ -21,7 +21,8 @@ The server advertises `_kitvr._tcp.local.` on the control port with TXT records
 1. Client opens a TCP connection to the control port.
 2. Both sides send `Hello`. If `version` differs, the side that cannot support the other's
    version sends `Bye` and closes.
-3. Server sends `StreamConfig` (codec, resolution, fps, starting bitrate).
+3. Server sends `StreamConfig` (codec, resolution, fps, starting bitrate) and, if audio is
+   enabled, `AudioConfig`.
 4. Client configures its decoder, then starts sending tracking packets by UDP to the server's
    media port. The server learns the client's UDP address from the first packet and sends
    video there. This avoids any need for the client to announce its port.
@@ -48,6 +49,7 @@ Maximum length is 65536. A decoder that sees `Truncated` should read more bytes 
 | 5 | Ping | `u64 ts_us` |
 | 6 | Pong | `u64 ts_us` (echo of the Ping value) |
 | 7 | Bye | empty |
+| 8 | AudioConfig | `u32 sample_rate`, `u8 channels` (PC to headset, 0 = none), `u16 frame_samples` (per channel, per packet), `u8 mic_channels` (headset to PC, 0 = none) |
 
 ## Video packets (implemented)
 
@@ -78,6 +80,25 @@ Design notes:
 - **Payload size.** Default 1200 bytes per packet to stay under a 1500 byte MTU with IP/UDP headers.
 - **Loss handling (v1).** If any packet of a slice is missing when the next frame's packets
   begin to arrive, the client drops that frame and sends `KeyframeRequest`. FEC is a later addition.
+
+## Audio packets (implemented)
+
+16-byte header followed by `payload_len` bytes of signed 16-bit little-endian PCM, interleaved.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | type: 3 = audio to the headset, 4 = microphone to the PC |
+| 1 | u8 | flags, 0 (bit 0 is reserved for Opus) |
+| 2 | u16 | seq |
+| 4 | u64 | timestamp_us (sender's monotonic clock) |
+| 12 | u16 | payload_len |
+| 14 | u16 | reserved, 0 |
+
+Version 1 uses 48 kHz. PC audio is stereo in 240-sample (5 ms) packets. Microphone audio is mono
+in 480-sample (10 ms) packets. The receiver keeps a small jitter buffer (about 30 ms), starts
+playing once it is filled, and drops the oldest audio if it grows past about 80 ms. The server
+converts whatever format the chosen PC device uses to 48 kHz stereo. PCM costs about 1.5 Mbps
+downstream, which is small next to the video stream. Opus can replace it later using the flag bit.
 
 ## Tracking packets (implemented)
 

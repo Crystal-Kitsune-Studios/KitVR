@@ -14,7 +14,8 @@ target_include_directories(native_app_glue PUBLIC
 add_library(kitvr SHARED
     main.cpp
     session.cpp
-    decoder.cpp)
+    decoder.cpp
+    audio.cpp)
 
 target_compile_definitions(kitvr PRIVATE
     XR_USE_PLATFORM_ANDROID
@@ -24,7 +25,7 @@ target_compile_options(kitvr PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(kitvr PRIVATE
     native_app_glue
     OpenXR::openxr_loader
-    android log EGL GLESv3 mediandk)
+    android log EGL GLESv3 mediandk aaudio)
 
 # Keep the entry point that NativeActivity looks up, since it lives in a static library.
 set_target_properties(kitvr PROPERTIES LINK_FLAGS "-u ANativeActivity_onCreate")

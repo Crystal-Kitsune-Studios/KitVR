@@ -1,6 +1,7 @@
 //! Wire protocol shared by the PC server and (via a C ABI or a port) the Quest client.
 //! See docs/PROTOCOL.md for the normative description. No dependencies on purpose.
 
+pub mod audio;
 pub mod control;
 pub mod tracking;
 pub mod video;

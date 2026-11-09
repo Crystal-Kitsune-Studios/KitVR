@@ -29,6 +29,9 @@ impl Codec {
 pub enum Message {
     Hello { version: u16, name: String },
     StreamConfig { codec: Codec, width: u16, height: u16, fps: u16, bitrate_kbps: u32 },
+    /// Audio format. `channels` is the PC-to-headset stream (0 = none), `mic_channels` is the
+    /// headset-to-PC microphone stream (0 = none). Samples are 16 bit PCM.
+    AudioConfig { sample_rate: u32, channels: u8, frame_samples: u16, mic_channels: u8 },
     /// Client lost data; `last_good_frame` is the last frame_id it fully decoded.
     KeyframeRequest { last_good_frame: u32 },
     BitrateRequest { bitrate_kbps: u32 },
@@ -44,6 +47,7 @@ const TAG_BITRATE_REQUEST: u8 = 4;
 const TAG_PING: u8 = 5;
 const TAG_PONG: u8 = 6;
 const TAG_BYE: u8 = 7;
+const TAG_AUDIO_CONFIG: u8 = 8;
 
 pub fn encode_message(msg: &Message) -> Vec<u8> {
     let mut body = Vec::new();
@@ -63,6 +67,13 @@ pub fn encode_message(msg: &Message) -> Vec<u8> {
             body.extend_from_slice(&fps.to_le_bytes());
             body.extend_from_slice(&bitrate_kbps.to_le_bytes());
             TAG_STREAM_CONFIG
+        }
+        Message::AudioConfig { sample_rate, channels, frame_samples, mic_channels } => {
+            body.extend_from_slice(&sample_rate.to_le_bytes());
+            body.push(*channels);
+            body.extend_from_slice(&frame_samples.to_le_bytes());
+            body.push(*mic_channels);
+            TAG_AUDIO_CONFIG
         }
         Message::KeyframeRequest { last_good_frame } => {
             body.extend_from_slice(&last_good_frame.to_le_bytes());
@@ -148,6 +159,12 @@ pub fn decode_message(buf: &[u8]) -> Result<(Message, usize), DecodeError> {
             fps: r.u16()?,
             bitrate_kbps: r.u32()?,
         },
+        TAG_AUDIO_CONFIG => Message::AudioConfig {
+            sample_rate: r.u32()?,
+            channels: r.u8()?,
+            frame_samples: r.u16()?,
+            mic_channels: r.u8()?,
+        },
         TAG_KEYFRAME_REQUEST => Message::KeyframeRequest { last_good_frame: r.u32()? },
         TAG_BITRATE_REQUEST => Message::BitrateRequest { bitrate_kbps: r.u32()? },
         TAG_PING => Message::Ping { ts_us: r.u64()? },
@@ -166,6 +183,7 @@ mod tests {
         vec![
             Message::Hello { version: 1, name: "Quest 3".to_string() },
             Message::StreamConfig { codec: Codec::Hevc, width: 1920, height: 1080, fps: 90, bitrate_kbps: 80_000 },
+            Message::AudioConfig { sample_rate: 48_000, channels: 2, frame_samples: 240, mic_channels: 1 },
             Message::KeyframeRequest { last_good_frame: 1234 },
             Message::BitrateRequest { bitrate_kbps: 50_000 },
             Message::Ping { ts_us: 1 },

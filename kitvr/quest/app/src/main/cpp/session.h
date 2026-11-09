@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "audio.h"
 #include "decoder.h"
 #include "proto.h"
 
@@ -35,6 +36,12 @@ public:
     // head = {px, py, pz, qx, qy, qz, qw}. The first packet tells the server where to send video.
     void sendTracking(uint64_t tsUs, const float head[7]);
 
+    // Call once per frame from the main thread. Starts audio streams when they are due.
+    void tick();
+    // True when the server wants microphone audio, so the app should hold the permission.
+    bool wantsMic();
+    void setMicPermission(bool granted) { micAllowed_ = granted; }
+
     void shutdown();
 
 private:
@@ -51,6 +58,7 @@ private:
 
     std::mutex cfgMutex_;
     std::optional<StreamConfig> pendingCfg_;
+    std::optional<AudioConfig> audioCfg_;
     std::atomic<uint32_t> epoch_{0};  // bumped on every new control session
 
     int udpFd_ = -1;
@@ -59,6 +67,12 @@ private:
     std::thread mediaThread_;
     VideoDecoder decoder_;
     std::atomic<uint16_t> trackSeq_{0};
+
+    Audio audio_;
+    std::atomic<bool> micAllowed_{false};
+    std::atomic<uint16_t> micSeq_{0};
+    uint64_t lastAudioTryUs_ = 0;
+    void onMicFrame(const int16_t* samples, size_t count);
 };
 
 }  // namespace kitvr

@@ -10,7 +10,9 @@ Native Android app (C++ via the NDK, no Java) using OpenXR. One APK for Quest 2,
 3. When the session is visible, an `XR_KHR_android_surface_swapchain` is created at the stream
    resolution. Its Surface is handed to `decoder.cpp`, so MediaCodec renders frames straight into
    the compositor. The swapchain is submitted as a quad layer 2 m in front of you.
-4. Every frame, the head pose is sent to the server over UDP. The first packet also tells the
+4. If the server enables audio, PC audio plays through AAudio with a small jitter buffer, and
+   the microphone is captured and sent back. Microphone permission is requested at runtime.
+5. Every frame, the head pose is sent to the server over UDP. The first packet also tells the
    server where to send video.
 
 ```
@@ -20,6 +22,7 @@ app/src/main/
     main.cpp      OpenXR setup, event loop, quad layer
     session.*     control channel, UDP receive, frame reassembly, keyframe requests
     decoder.*     AMediaCodec wrapper (low-latency HEVC)
+    audio.*       AAudio playback of PC audio and microphone capture
     proto.h       C++ port of crates/proto
 ```
 
@@ -63,5 +66,10 @@ This code was written without being able to build it, so expect to fix small thi
   (`session state 4` or `5` in the log) and that `video ready` was logged.
 - **Decoder errors.** Some devices need the `vendor.qti-ext-dec-low-latency.enable` format key.
   Try removing `low-latency` and `operating-rate` in `decoder.cpp` to rule them out.
+- **No microphone.** The permission prompt is raised from a native thread through JNI, which
+  can fail on some builds. Grant it manually:
+  `adb shell pm grant com.crystalkitsune.kitvr android.permission.RECORD_AUDIO`, then relaunch.
+- **Crackling or drifting audio.** Playback trims itself above 80 ms of buffered audio and
+  re-primes after an underrun. Persistent crackle usually means Wi-Fi packet loss.
 - **Loader.** The OpenXR loader AAR is pinned to 1.0.34 so the API version matches what Quest
   runtimes expect. Do not bump it casually.

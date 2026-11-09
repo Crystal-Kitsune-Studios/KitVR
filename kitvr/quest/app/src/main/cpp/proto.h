@@ -17,6 +17,9 @@ constexpr size_t kVideoHeaderLen = 24;
 constexpr size_t kTrackingLen = 136;
 constexpr uint8_t kPacketVideo = 1;
 constexpr uint8_t kPacketTracking = 2;
+constexpr uint8_t kPacketAudioDown = 3;  // PC audio to the headset
+constexpr uint8_t kPacketAudioUp = 4;    // microphone to the PC
+constexpr size_t kAudioHeaderLen = 16;
 constexpr uint8_t kFlagKeyframe = 1;
 constexpr uint8_t kFlagLastSlice = 2;
 
@@ -28,6 +31,7 @@ enum Tag : uint8_t {
     kPing = 5,
     kPong = 6,
     kBye = 7,
+    kAudioConfig = 8,
 };
 
 enum Codec : uint8_t { kH264 = 1, kHevc = 2, kAv1 = 3 };
@@ -100,11 +104,19 @@ struct StreamConfig {
     uint32_t bitrateKbps = 0;
 };
 
+struct AudioConfig {
+    uint32_t sampleRate = 0;
+    uint8_t channels = 0;     // PC to headset, 0 = none
+    uint16_t frameSamples = 0;
+    uint8_t micChannels = 0;  // headset to PC, 0 = none
+};
+
 struct Message {
     uint8_t tag = 0;
     uint16_t version = 0;  // Hello
     std::string name;      // Hello
     StreamConfig cfg;      // StreamConfig
+    AudioConfig audio;     // AudioConfig
     uint64_t tsUs = 0;     // Ping, Pong
 };
 
@@ -144,6 +156,15 @@ public:
                 m.cfg.fps = get16(p + 5);
                 m.cfg.bitrateKbps = get32(p + 7);
             }
+        } else if (m.tag == kAudioConfig) {
+            if (n < 8) {
+                ok = false;
+            } else {
+                m.audio.sampleRate = get32(p);
+                m.audio.channels = p[4];
+                m.audio.frameSamples = get16(p + 5);
+                m.audio.micChannels = p[7];
+            }
         } else if (m.tag == kPing || m.tag == kPong) {
             if (n < 8) ok = false;
             else m.tsUs = get64(p);
@@ -181,6 +202,28 @@ inline bool parseVideo(const uint8_t* d, size_t n, VideoHeader& h, const uint8_t
     h.payloadLen = get16(d + 20);
     if (n < kVideoHeaderLen + h.payloadLen) return false;
     payload = d + kVideoHeaderLen;
+    return true;
+}
+
+// ---- audio packets ----
+// Payload is signed 16 bit little-endian PCM, interleaved.
+inline void encodeAudioUp(std::vector<uint8_t>& v, uint16_t seq, uint64_t tsUs, const int16_t* pcm, size_t count) {
+    v.clear();
+    v.push_back(kPacketAudioUp);
+    v.push_back(0);
+    put16(v, seq);
+    put64(v, tsUs);
+    put16(v, static_cast<uint16_t>(count * 2));
+    put16(v, 0);
+    for (size_t i = 0; i < count; i++) put16(v, static_cast<uint16_t>(pcm[i]));
+}
+
+inline bool parseAudioDown(const uint8_t* d, size_t n, const uint8_t*& payload, size_t& payloadLen) {
+    if (n < kAudioHeaderLen || d[0] != kPacketAudioDown) return false;
+    size_t len = get16(d + 12);
+    if (n < kAudioHeaderLen + len) return false;
+    payload = d + kAudioHeaderLen;
+    payloadLen = len;
     return true;
 }
 

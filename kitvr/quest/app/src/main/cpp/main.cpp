@@ -66,6 +66,9 @@ struct AppState {
     bool haveCfg = false;
     kitvr::StreamConfig cfg;
 
+    bool micRequested = false;
+    uint64_t lastPermCheckUs = 0;
+
     kitvr::Session net;
 };
 
@@ -116,6 +119,41 @@ std::string resolveHost(android_app* app) {
         h = kDefaultHost;
     }
     return h;
+}
+
+// ---------------------------------------------------------------- microphone permission
+
+constexpr const char* kMicPermission = "android.permission.RECORD_AUDIO";
+
+bool hasMicPermission(android_app* app) {
+    JNIEnv* env = nullptr;
+    if (app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return false;
+    jobject activity = app->activity->clazz;
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID check = env->GetMethodID(cls, "checkSelfPermission", "(Ljava/lang/String;)I");
+    if (!check) return false;
+    jstring perm = env->NewStringUTF(kMicPermission);
+    jint result = env->CallIntMethod(activity, check, perm);
+    env->DeleteLocalRef(perm);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return result == 0;  // PackageManager.PERMISSION_GRANTED
+}
+
+void requestMicPermission(android_app* app) {
+    JNIEnv* env = nullptr;
+    if (app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return;
+    jobject activity = app->activity->clazz;
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID request = env->GetMethodID(cls, "requestPermissions", "([Ljava/lang/String;I)V");
+    if (!request) return;
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray perms = env->NewObjectArray(1, stringClass, env->NewStringUTF(kMicPermission));
+    env->CallVoidMethod(activity, request, perms, 1);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    LOGI("requested microphone permission");
 }
 
 // ---------------------------------------------------------------- OpenXR setup
@@ -340,6 +378,20 @@ void maintainVideo(AppState& S) {
     }
 }
 
+void maintainAudio(AppState& S) {
+    S.net.tick();
+    if (!S.net.wantsMic()) return;
+    uint64_t now = kitvr::nowUs();
+    if (now - S.lastPermCheckUs < 1000000) return;
+    S.lastPermCheckUs = now;
+    if (hasMicPermission(S.app)) {
+        S.net.setMicPermission(true);
+    } else if (!S.micRequested) {
+        requestMicPermission(S.app);
+        S.micRequested = true;
+    }
+}
+
 void renderFrame(AppState& S) {
     XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState fs{XR_TYPE_FRAME_STATE};
@@ -434,6 +486,7 @@ void android_main(android_app* app) {
 
         pollXrEvents(S);
         maintainVideo(S);
+        maintainAudio(S);
         if (S.sessionBegun) renderFrame(S);
     }
 
