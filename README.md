@@ -9,6 +9,7 @@ Targets Quest 2, 3 and 3S. The PC server runs on Windows and Linux.
 crates/proto    wire protocol (no dependencies, fully unit tested)
 crates/core     platform-neutral traits: CaptureSource, VideoEncoder, InputInjector
 crates/server   PC server binary; bridge.rs streams via ffmpeg, platform/ holds native backends
+crates/desktop  optional Windows/Linux GUI for configuring and starting the PC server
 quest/          Android NDK + OpenXR client (see quest/README.md)
 docs/PROTOCOL.md  normative protocol description
 SECURITY.md     supported versions and how to report vulnerabilities
@@ -40,6 +41,19 @@ You need Rust, ffmpeg on your PATH, and a Quest with developer mode enabled.
    Encoders: `hevc_nvenc` (NVIDIA), `hevc_amf` (AMD, Windows), `hevc_qsv` (Intel),
    `hevc_vaapi` (AMD/Intel, Linux), `libx265` (CPU). Desktop capture uses `gdigrab` on Windows
    and `x11grab` on Linux (X11 or XWayland only).
+
+### Optional desktop app
+
+Build the desktop GUI and server together so the server executable sits beside the app:
+
+```
+cargo build --release -p kitvr-desktop -p kitvr-server
+```
+
+Run `target/release/kitvr-desktop` (or `kitvr-desktop.exe` on Windows). Choose a source and
+encoder, then start streaming; the GUI displays the PC address to enter in the Quest app and shows
+server output. FFmpeg must be installed and available on `PATH` (or set `KITVR_FFMPEG`). The
+existing `kitvr-server` command-line workflow remains available without the GUI.
 
 ## Audio
 
