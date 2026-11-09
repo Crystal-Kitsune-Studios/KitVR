@@ -4,3 +4,6 @@ quest/**/build/
 quest/**/.cxx/
 quest/**/.gradle/
 local.properties
+*.h265
+*.mp4
+frame.png
