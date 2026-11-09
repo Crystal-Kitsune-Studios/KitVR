@@ -55,6 +55,10 @@ encoder, then start streaming; the GUI displays the PC address to enter in the Q
 server output. FFmpeg must be installed and available on `PATH` (or set `KITVR_FFMPEG`). The
 existing `kitvr-server` command-line workflow remains available without the GUI.
 
+GitHub Actions packages Windows as `KitVR-windows-x86_64.zip` (desktop and server executables
+together) and Linux as `KitVR-linux-x86_64.AppImage`. Both packages still require FFmpeg installed
+on the PC; the AppImage bundles the GUI and KitVR server, not FFmpeg.
+
 ## Audio
 
 PC audio plays in the headset, and the headset microphone can be sent back to the PC.

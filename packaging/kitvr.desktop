@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=KitVR
+Comment=PC-to-Quest VR streaming
+Exec=kitvr-desktop
+Icon=kitvr
+Terminal=false
+Categories=Network;

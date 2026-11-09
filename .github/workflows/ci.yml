@@ -57,8 +57,63 @@ jobs:
           path: quest/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
+  desktop-package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libxcb-shape0-dev libxcb-xfixes0-dev librsvg2-bin
+
+      - name: Build desktop app and server
+        run: cargo build --release --locked -p kitvr-desktop -p kitvr-server
+
+      - name: Package Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item target/release/kitvr-desktop.exe package/
+          Copy-Item target/release/kitvr-server.exe package/
+          Copy-Item README.md package/
+          Compress-Archive -Path package/* -DestinationPath KitVR-windows-x86_64.zip
+
+      - name: Package Linux AppImage
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps AppDir/usr/share/doc/kitvr
+          cp target/release/kitvr-desktop target/release/kitvr-server AppDir/usr/bin/
+          cp README.md AppDir/usr/share/doc/kitvr/
+          cp packaging/kitvr.desktop AppDir/usr/share/applications/
+          rsvg-convert -w 256 -h 256 packaging/kitvr.svg -o AppDir/usr/share/icons/hicolor/256x256/apps/kitvr.png
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O linuxdeploy.AppImage
+          chmod +x linuxdeploy.AppImage
+          ./linuxdeploy.AppImage --appimage-extract-and-run --appdir AppDir --desktop-file AppDir/usr/share/applications/kitvr.desktop --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/kitvr.png --executable AppDir/usr/bin/kitvr-desktop --executable AppDir/usr/bin/kitvr-server --output appimage
+          mv KitVR-x86_64.AppImage KitVR-linux-x86_64.AppImage
+
+      - name: Upload desktop package
+        uses: actions/upload-artifact@v4
+        with:
+          name: kitvr-desktop-${{ matrix.platform }}
+          path: KitVR-${{ matrix.platform }}.*
+          if-no-files-found: error
+
   release-apk:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: desktop-package
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -100,9 +155,19 @@ jobs:
           : "${ANDROID_KEY_PASSWORD:?Add ANDROID_KEY_PASSWORD to repository Actions secrets}"
           gradle assembleRelease --stacktrace
 
-      - name: Publish APK on GitHub Release
+      - name: Download desktop packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kitvr-desktop-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish packages on GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: KitVR Quest ${{ github.ref_name }}
+          name: KitVR ${{ github.ref_name }}
           generate_release_notes: true
-          files: quest/app/build/outputs/apk/release/app-release.apk
+          files: |
+            quest/app/build/outputs/apk/release/app-release.apk
+            release-assets/*.zip
+            release-assets/*.AppImage
