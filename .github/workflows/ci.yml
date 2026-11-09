@@ -50,9 +50,59 @@ jobs:
         working-directory: quest
         run: gradle assembleDebug --stacktrace
 
-      - name: Upload APK
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: kitvr-quest-debug
           path: quest/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+  release-apk:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android SDK components
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Decode release signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          : "${ANDROID_KEYSTORE_BASE64:?Add ANDROID_KEYSTORE_BASE64 to repository Actions secrets}"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/kitvr-release.keystore"
+
+      - name: Build signed release APK
+        working-directory: quest
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/kitvr-release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          : "${ANDROID_KEYSTORE_PASSWORD:?Add ANDROID_KEYSTORE_PASSWORD to repository Actions secrets}"
+          : "${ANDROID_KEY_ALIAS:?Add ANDROID_KEY_ALIAS to repository Actions secrets}"
+          : "${ANDROID_KEY_PASSWORD:?Add ANDROID_KEY_PASSWORD to repository Actions secrets}"
+          gradle assembleRelease --stacktrace
+
+      - name: Publish APK on GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: KitVR Quest ${{ github.ref_name }}
+          generate_release_notes: true
+          files: quest/app/build/outputs/apk/release/app-release.apk
