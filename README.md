@@ -125,6 +125,5 @@ device-specific issues on first build.
 
 ## License
 
-Not chosen yet. Decide before accepting contributions or copying code from other projects:
-ALVR is MIT-licensed and WiVRn is GPL-licensed, so reading either for ideas is fine, but
-copying code constrains your license.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
