@@ -383,26 +383,6 @@ bool createSession(AppState& S) {
     return true;
 }
 
-bool createHandTrackers(AppState& S) {
-    if (!S.hasHandTracking) return true;
-    for (size_t i = 0; i < S.handTrackers.size(); ++i) {
-        XrHandTrackerCreateInfo info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
-        info.hand = i == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
-        info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
-        if (XR_FAILED(S.createHandTracker(S.session, &info, &S.handTrackers[i]))) {
-            LOGW("hand tracking unavailable for hand %u", static_cast<unsigned>(i));
-            for (XrHandTrackerEXT& tracker : S.handTrackers) {
-                if (tracker != XR_NULL_HANDLE) S.destroyHandTracker(tracker);
-                tracker = XR_NULL_HANDLE;
-            }
-            S.hasHandTracking = false;
-            return true;
-        }
-    }
-    LOGI("OpenXR hand tracking enabled");
-    return true;
-}
-
 bool createBodyTracker(AppState& S) {
     if (!S.hasBodyTracking) return true;
 
@@ -436,27 +416,6 @@ bool createBodyTracker(AppState& S) {
         return true;
     }
     LOGI("body tracking enabled with %u joints", S.bodyJointCount);
-    return true;
-}
-
-bool createHandTrackers(AppState& S) {
-    if (!S.hasHandTracking) return true;
-    for (size_t i = 0; i < S.handTrackers.size(); ++i) {
-        XrHandTrackerCreateInfoEXT info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
-        info.hand = i == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
-        info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
-        if (XR_FAILED(S.createHandTracker(S.session, &info, &S.handTrackers[i]))) {
-            LOGW("could not create hand tracker %u; controller inputs remain available",
-                 static_cast<unsigned>(i));
-            for (XrHandTrackerEXT& tracker : S.handTrackers) {
-                if (tracker != XR_NULL_HANDLE) S.destroyHandTracker(tracker);
-                tracker = XR_NULL_HANDLE;
-            }
-            S.hasHandTracking = false;
-            return true;
-        }
-    }
-    LOGI("OpenXR hand tracking enabled");
     return true;
 }
 
