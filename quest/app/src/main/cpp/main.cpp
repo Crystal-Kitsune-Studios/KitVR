@@ -36,6 +36,14 @@
         }                                                                     \
     } while (0)
 
+#define CHECK_BOOL(call)                                                      \
+    do {                                                                      \
+        if (!(call)) {                                                        \
+            LOGE("%s failed (line %d)", #call, __LINE__);                   \
+            return false;                                                     \
+        }                                                                     \
+    } while (0)
+
 namespace {
 
 constexpr float kQuadHeightM = 1.6f;
@@ -328,45 +336,45 @@ bool createActions(AppState& S) {
         const char* base = i == 0 ? "/user/hand/left" : "/user/hand/right";
         auto& actions = S.handActions[i];
         std::string actionName = std::string(hand) + "_grip_pose";
-        CHECK(createHandAction(S, i, actionName.c_str(), "Grip pose",
+        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Grip pose",
                               XR_ACTION_TYPE_POSE_INPUT, actions.pose));
         actionName = std::string(hand) + "_trigger_value";
-        CHECK(createHandAction(S, i, actionName.c_str(), "Trigger",
+        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Trigger",
                               XR_ACTION_TYPE_FLOAT_INPUT, actions.trigger));
         actionName = std::string(hand) + "_trigger_click";
-        CHECK(createHandAction(S, i, actionName.c_str(), "Trigger click",
+        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Trigger click",
                               XR_ACTION_TYPE_BOOLEAN_INPUT, actions.triggerClick));
         actionName = std::string(hand) + "_squeeze";
-        CHECK(createHandAction(S, i, actionName.c_str(), "Grip",
+        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Grip",
                               XR_ACTION_TYPE_FLOAT_INPUT, actions.squeeze));
         actionName = std::string(hand) + "_thumbstick";
-        CHECK(createHandAction(S, i, actionName.c_str(), "Thumbstick",
+        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Thumbstick",
                               XR_ACTION_TYPE_VECTOR2F_INPUT, actions.thumbstick));
         actionName = std::string(hand) + "_thumbstick_click";
-        CHECK(createHandAction(S, i, actionName.c_str(), "Thumbstick click",
+        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Thumbstick click",
                               XR_ACTION_TYPE_BOOLEAN_INPUT, actions.thumbstickClick));
         actionName = std::string(hand) + "_primary";
-        CHECK(createHandAction(S, i, actionName.c_str(), "Primary button",
+        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Primary button",
                               XR_ACTION_TYPE_BOOLEAN_INPUT, actions.primary));
         actionName = std::string(hand) + "_secondary";
-        CHECK(createHandAction(S, i, actionName.c_str(), "Secondary button",
+        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Secondary button",
                               XR_ACTION_TYPE_BOOLEAN_INPUT, actions.secondary));
         actionName = std::string(hand) + "_menu";
-        CHECK(createHandAction(S, i, actionName.c_str(), "Menu button",
+        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Menu button",
                               XR_ACTION_TYPE_BOOLEAN_INPUT, actions.menu));
 
-        CHECK(addBinding(S, actions.pose, (std::string(base) + "/input/grip/pose").c_str(), bindings));
-        CHECK(addBinding(S, actions.trigger, (std::string(base) + "/input/trigger/value").c_str(), bindings));
-        CHECK(addBinding(S, actions.triggerClick, (std::string(base) + "/input/trigger/click").c_str(), bindings));
-        CHECK(addBinding(S, actions.squeeze, (std::string(base) + "/input/squeeze/value").c_str(), bindings));
-        CHECK(addBinding(S, actions.thumbstick, (std::string(base) + "/input/thumbstick").c_str(), bindings));
-        CHECK(addBinding(S, actions.thumbstickClick, (std::string(base) + "/input/thumbstick/click").c_str(), bindings));
+        CHECK_BOOL(addBinding(S, actions.pose, (std::string(base) + "/input/grip/pose").c_str(), bindings));
+        CHECK_BOOL(addBinding(S, actions.trigger, (std::string(base) + "/input/trigger/value").c_str(), bindings));
+        CHECK_BOOL(addBinding(S, actions.triggerClick, (std::string(base) + "/input/trigger/click").c_str(), bindings));
+        CHECK_BOOL(addBinding(S, actions.squeeze, (std::string(base) + "/input/squeeze/value").c_str(), bindings));
+        CHECK_BOOL(addBinding(S, actions.thumbstick, (std::string(base) + "/input/thumbstick").c_str(), bindings));
+        CHECK_BOOL(addBinding(S, actions.thumbstickClick, (std::string(base) + "/input/thumbstick/click").c_str(), bindings));
         const char* primary = i == 0 ? "/input/x/click" : "/input/a/click";
         const char* secondary = i == 0 ? "/input/y/click" : "/input/b/click";
-        CHECK(addBinding(S, actions.primary, (std::string(base) + primary).c_str(), bindings));
-        CHECK(addBinding(S, actions.secondary, (std::string(base) + secondary).c_str(), bindings));
+        CHECK_BOOL(addBinding(S, actions.primary, (std::string(base) + primary).c_str(), bindings));
+        CHECK_BOOL(addBinding(S, actions.secondary, (std::string(base) + secondary).c_str(), bindings));
         if (i == 0) {
-            CHECK(addBinding(S, actions.menu, (std::string(base) + "/input/menu/click").c_str(), bindings));
+            CHECK_BOOL(addBinding(S, actions.menu, (std::string(base) + "/input/menu/click").c_str(), bindings));
         }
     }
 
