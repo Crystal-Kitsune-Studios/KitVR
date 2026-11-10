@@ -43,6 +43,12 @@ android {
 
     buildFeatures { prefab = true }
 
+    androidResources { noCompress += "mp3" }
+
+    sourceSets.getByName("main") {
+        assets.srcDir("../../assets")
+    }
+
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")

@@ -6,9 +6,13 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <uses-permission android:name="com.oculus.permission.BODY_TRACKING" />
 
     <uses-feature android:glEsVersion="0x00030002" android:required="true" />
     <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+    <uses-feature android:name="oculus.software.handtracking" android:required="false" />
+    <uses-feature android:name="oculus.software.body_tracking" android:required="false" />
 
     <application
         android:allowBackup="false"
@@ -28,7 +32,7 @@
         </activity>
 
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".KitVrActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="landscape"

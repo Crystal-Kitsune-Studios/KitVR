@@ -29,9 +29,13 @@ namespace {
 
 constexpr uint16_t kTrackingPort = 9945;
 constexpr uint8_t kTrackingPacketType = 2;
+constexpr uint8_t kBodyTrackingPacketType = 5;
 constexpr size_t kHeadPoseOffset = 12;
 constexpr size_t kHeadPoseEnd = 40;
 constexpr size_t kTrackingPacketLength = 136;
+constexpr size_t kBodyTrackingHeaderLength = 16;
+constexpr size_t kBodyTrackingJointCount = 6;
+constexpr size_t kBodyTrackingPacketLength = kBodyTrackingHeaderLength + kBodyTrackingJointCount * 28;
 constexpr uint32_t kEyeWidth = 1832;
 constexpr uint32_t kEyeHeight = 1920;
 constexpr uint16_t kTriggerClick = 1u << 0;
@@ -48,6 +52,11 @@ struct HandState {
     float grip = 0.0f;
     float stickX = 0.0f;
     float stickY = 0.0f;
+    float pose[7] = {0, 0, 0, 0, 0, 0, 1};
+};
+
+struct BodyTrackerState {
+    bool active = false;
     float pose[7] = {0, 0, 0, 0, 0, 0, 1};
 };
 
@@ -337,6 +346,59 @@ private:
     vr::VRInputComponentHandle_t poseComponent_ = vr::k_ulInvalidInputComponentHandle;
 };
 
+class BodyTracker final : public vr::ITrackedDeviceServerDriver {
+public:
+    BodyTracker(const char* serial, const char* model) : serial_(serial), model_(model) {}
+
+    vr::EVRInitError Activate(uint32_t objectId) override {
+        objectId_ = objectId;
+        auto* properties = vr::VRProperties();
+        const auto container = properties->TrackedDeviceToPropertyContainer(objectId);
+        properties->SetStringProperty(container, vr::Prop_TrackingSystemName_String, "KitVR");
+        properties->SetStringProperty(container, vr::Prop_ModelNumber_String, model_);
+        properties->SetStringProperty(container, vr::Prop_SerialNumber_String, serial_);
+        properties->SetStringProperty(container, vr::Prop_ManufacturerName_String, "Crystal Kitsune Studios");
+        return vr::VRInitError_None;
+    }
+
+    void Deactivate() override { objectId_ = vr::k_unTrackedDeviceIndexInvalid; }
+    void EnterStandby() override {}
+    void* GetComponent(const char*) override { return nullptr; }
+    void DebugRequest(const char*, char* response, uint32_t size) override {
+        if (size > 0) response[0] = '\0';
+    }
+
+    vr::DriverPose_t GetPose() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pose_;
+    }
+
+    uint32_t objectId() const { return objectId_; }
+
+    void update(const BodyTrackerState& state) {
+        vr::DriverPose_t pose{};
+        pose.poseTimeOffset = 0.0;
+        pose.qWorldFromDriverRotation = {1.0, 0.0, 0.0, 0.0};
+        pose.qDriverFromHeadRotation = {1.0, 0.0, 0.0, 0.0};
+        pose.vecPosition[0] = state.pose[0];
+        pose.vecPosition[1] = state.pose[1];
+        pose.vecPosition[2] = state.pose[2];
+        pose.qRotation = {state.pose[6], state.pose[3], state.pose[4], state.pose[5]};
+        pose.result = state.active ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange;
+        pose.poseIsValid = state.active;
+        pose.deviceIsConnected = state.active;
+        std::lock_guard<std::mutex> lock(mutex_);
+        pose_ = pose;
+    }
+
+private:
+    const char* serial_;
+    const char* model_;
+    uint32_t objectId_ = vr::k_unTrackedDeviceIndexInvalid;
+    std::mutex mutex_;
+    vr::DriverPose_t pose_{};
+};
+
 class Provider final : public vr::IServerTrackedDeviceProvider {
 public:
     vr::EVRInitError Init(vr::IVRDriverContext* context) override {
@@ -372,6 +434,12 @@ public:
                                       &rightController_)) {
             return vr::VRInitError_Driver_HmdUnknown;
         }
+        for (size_t i = 0; i < bodyTrackers_.size(); ++i) {
+            if (!host->TrackedDeviceAdded(bodyTrackerSerials_[i], vr::TrackedDeviceClass_GenericTracker,
+                                          bodyTrackers_[i])) {
+                return vr::VRInitError_Driver_HmdUnknown;
+            }
+        }
         return vr::VRInitError_None;
     }
 
@@ -388,8 +456,10 @@ public:
     void RunFrame() override {
         std::array<uint8_t, 256> packet{};
         bool gotPose = false;
+        bool gotBody = false;
         float head[7]{};
         std::array<HandState, 2> hands{};
+        std::array<BodyTrackerState, kBodyTrackingJointCount> body{};
         for (;;) {
 #ifdef _WIN32
             const int count = recv(socket_, reinterpret_cast<char*>(packet.data()),
@@ -397,8 +467,34 @@ public:
 #else
             const int count = static_cast<int>(recv(socket_, packet.data(), packet.size(), 0));
 #endif
-            if (count < static_cast<int>(kTrackingPacketLength)) break;
-            if (packet[0] != kTrackingPacketType) continue;
+            if (count < 1) break;
+            if (packet[0] == kBodyTrackingPacketType) {
+                if (count < static_cast<int>(kBodyTrackingPacketLength) || packet[1] != 1) continue;
+                const uint16_t activeMask = readU16Le(packet.data() + 12);
+                for (size_t i = 0; i < body.size(); ++i) {
+                    auto& tracker = body[i];
+                    tracker.active = (activeMask & (1u << i)) != 0;
+                    if (!tracker.active) continue;
+                    const size_t offset = kBodyTrackingHeaderLength + i * 28;
+                    bool valid = true;
+                    for (size_t j = 0; j < 7; ++j) {
+                        tracker.pose[j] = readF32Le(packet.data() + offset + j * sizeof(float));
+                        valid &= std::isfinite(tracker.pose[j]);
+                    }
+                    const float norm = std::sqrt(tracker.pose[3] * tracker.pose[3] +
+                                                 tracker.pose[4] * tracker.pose[4] +
+                                                 tracker.pose[5] * tracker.pose[5] +
+                                                 tracker.pose[6] * tracker.pose[6]);
+                    tracker.active &= valid && norm > 1e-6f;
+                    if (tracker.active) {
+                        for (size_t j = 3; j < 7; ++j) tracker.pose[j] /= norm;
+                    }
+                }
+                gotBody = true;
+                continue;
+            }
+            if (count < static_cast<int>(kTrackingPacketLength) ||
+                packet[0] != kTrackingPacketType) continue;
             bool valid = true;
             float parsed[7]{};
             for (size_t i = 0; i < 7; ++i) {
@@ -456,6 +552,14 @@ public:
             rightController_.update(HandState{}, false);
             havePose_ = false;
         }
+        if (gotBody) {
+            for (size_t i = 0; i < body.size(); ++i) bodyTrackers_[i]->update(body[i]);
+            lastBody_ = now;
+            haveBody_ = true;
+        } else if (haveBody_ && now - lastBody_ > std::chrono::milliseconds(300)) {
+            for (auto* tracker : bodyTrackers_) tracker->update(BodyTrackerState{});
+            haveBody_ = false;
+        }
 
         if (hmd_.objectId() != vr::k_unTrackedDeviceIndexInvalid) {
             const auto pose = hmd_.GetPose();
@@ -467,6 +571,13 @@ public:
                 const auto pose = controller->GetPose();
                 vr::VRServerDriverHost()->TrackedDevicePoseUpdated(
                     controller->objectId(), pose, sizeof(pose));
+            }
+        }
+        for (auto* tracker : bodyTrackers_) {
+            if (tracker->objectId() != vr::k_unTrackedDeviceIndexInvalid) {
+                const auto pose = tracker->GetPose();
+                vr::VRServerDriverHost()->TrackedDevicePoseUpdated(
+                    tracker->objectId(), pose, sizeof(pose));
             }
         }
     }
@@ -489,9 +600,22 @@ private:
     Hmd hmd_;
     Controller leftController_{true};
     Controller rightController_{false};
+    BodyTracker waist_{"KITVR-FBT-WAIST", "KitVR Waist Tracker"};
+    BodyTracker chest_{"KITVR-FBT-CHEST", "KitVR Chest Tracker"};
+    BodyTracker leftKnee_{"KITVR-FBT-L-KNEE", "KitVR Left Knee Tracker"};
+    BodyTracker rightKnee_{"KITVR-FBT-R-KNEE", "KitVR Right Knee Tracker"};
+    BodyTracker leftFoot_{"KITVR-FBT-L-FOOT", "KitVR Left Foot Tracker"};
+    BodyTracker rightFoot_{"KITVR-FBT-R-FOOT", "KitVR Right Foot Tracker"};
+    std::array<const char*, kBodyTrackingJointCount> bodyTrackerSerials_{
+        "KITVR-FBT-WAIST", "KITVR-FBT-CHEST", "KITVR-FBT-L-KNEE",
+        "KITVR-FBT-R-KNEE", "KITVR-FBT-L-FOOT", "KITVR-FBT-R-FOOT"};
+    std::array<BodyTracker*, kBodyTrackingJointCount> bodyTrackers_{
+        &waist_, &chest_, &leftKnee_, &rightKnee_, &leftFoot_, &rightFoot_};
     SocketHandle socket_ = kInvalidSocket;
     std::chrono::steady_clock::time_point lastPose_{};
+    std::chrono::steady_clock::time_point lastBody_{};
     bool havePose_ = false;
+    bool haveBody_ = false;
 };
 
 Provider provider;

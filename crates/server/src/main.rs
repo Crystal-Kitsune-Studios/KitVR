@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use kitvr_core::proto::audio::{pcm_from_payload, AudioHeader, PACKET_TYPE_AUDIO_UP};
 use kitvr_core::proto::control::{decode_message, encode_message, Codec, Message};
-use kitvr_core::proto::tracking::{Tracking, PACKET_TYPE_TRACKING};
+use kitvr_core::proto::tracking::{
+    BodyTracking, Tracking, PACKET_TYPE_BODY_TRACKING, PACKET_TYPE_TRACKING,
+};
 use kitvr_core::proto::{DecodeError, CONTROL_PORT, MEDIA_PORT, PROTOCOL_VERSION};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
@@ -182,6 +184,10 @@ fn handle_control(
                             println!("client media address: {from}");
                             *c = Some(from);
                         }
+                    }
+                } else if buf[0] == PACKET_TYPE_BODY_TRACKING {
+                    if BodyTracking::parse(&buf[..n]).is_ok() {
+                        let _ = udp.send_to(&buf[..n], ("127.0.0.1", STEAMVR_TRACKING_PORT));
                     }
                 } else if buf[0] == PACKET_TYPE_AUDIO_UP && mic_enabled {
                     if let Ok((_, payload)) = AudioHeader::parse(&buf[..n]) {

@@ -13,7 +13,11 @@ Android app (Java launcher and C++ via the NDK) using OpenXR. One APK for Quest 
 4. If the server enables audio, PC audio plays through AAudio with a small jitter buffer, and
    the microphone is captured and sent back. Microphone permission is requested at runtime.
 5. Every frame, the head pose and active Touch-controller state are sent to the server over UDP.
-  The first packet also tells the server where to send video.
+  If Touch controllers are not active, OpenXR hand tracking can map palm pose and pinch/grab to
+  controller inputs. On runtimes that expose Meta's full-body joint set, selected body trackers
+  are also sent to the SteamVR driver. The first head packet tells the server where to send video.
+6. Optional waiting music plays quietly while connecting and fades out when the first video frame
+  renders. Turn it off with the **Play music while waiting for video** checkbox in the launcher.
 
 ```
 app/src/main/

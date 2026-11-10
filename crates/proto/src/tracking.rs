@@ -15,6 +15,9 @@ use crate::DecodeError;
 
 pub const PACKET_TYPE_TRACKING: u8 = 2;
 pub const TRACKING_LEN: usize = 136;
+pub const PACKET_TYPE_BODY_TRACKING: u8 = 5;
+pub const BODY_TRACKING_JOINTS: usize = 6;
+pub const BODY_TRACKING_LEN: usize = 16 + BODY_TRACKING_JOINTS * 28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Pose {
@@ -113,6 +116,49 @@ impl Tracking {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BodyTracking {
+    pub seq: u16,
+    pub timestamp_us: u64,
+    pub active_mask: u16,
+    /// Hips, chest, left knee, right knee, left ankle, right ankle.
+    pub joints: [Pose; BODY_TRACKING_JOINTS],
+}
+
+impl BodyTracking {
+    pub fn write_to(&self, out: &mut Vec<u8>) {
+        out.push(PACKET_TYPE_BODY_TRACKING);
+        out.push(1); // packet format version
+        out.extend_from_slice(&self.seq.to_le_bytes());
+        out.extend_from_slice(&self.timestamp_us.to_le_bytes());
+        out.extend_from_slice(&self.active_mask.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        for joint in &self.joints {
+            joint.write_to(out);
+        }
+    }
+
+    pub fn parse(buf: &[u8]) -> Result<Self, DecodeError> {
+        if buf.len() < BODY_TRACKING_LEN {
+            return Err(DecodeError::Truncated);
+        }
+        if buf[0] != PACKET_TYPE_BODY_TRACKING || buf[1] != 1 {
+            return Err(DecodeError::BadType(buf[0]));
+        }
+        let mut joints = [Pose::default(); BODY_TRACKING_JOINTS];
+        for (index, joint) in joints.iter_mut().enumerate() {
+            let start = 16 + index * 28;
+            *joint = Pose::parse(&buf[start..start + 28]);
+        }
+        Ok(Self {
+            seq: u16::from_le_bytes(buf[2..4].try_into().unwrap()),
+            timestamp_us: u64::from_le_bytes(buf[4..12].try_into().unwrap()),
+            active_mask: u16::from_le_bytes(buf[12..14].try_into().unwrap()),
+            joints,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +184,19 @@ mod tests {
         let mut buf = vec![0u8; TRACKING_LEN];
         buf[0] = 1;
         assert_eq!(Tracking::parse(&buf), Err(DecodeError::BadType(1)));
+    }
+
+    #[test]
+    fn body_tracking_roundtrips_fixed_joints_and_mask() {
+        let packet = BodyTracking {
+            seq: 12,
+            timestamp_us: 34,
+            active_mask: 0b11,
+            joints: [Pose::default(); BODY_TRACKING_JOINTS],
+        };
+        let mut bytes = Vec::new();
+        packet.write_to(&mut bytes);
+        assert_eq!(bytes.len(), BODY_TRACKING_LEN);
+        assert_eq!(BodyTracking::parse(&bytes).unwrap(), packet);
     }
 }

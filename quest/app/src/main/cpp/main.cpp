@@ -50,6 +50,17 @@ constexpr float kQuadHeightM = 1.6f;
 constexpr float kQuadDistanceM = 2.0f;
 constexpr const char* kDefaultHost = "192.168.1.100";
 constexpr const char* kHostFile = "/sdcard/Android/data/com.crystalkitsune.kitvr/files/host.txt";
+constexpr const char* kMetaFullBodyExtensionName = "XR_META_body_tracking_full_body";
+constexpr uint32_t kMetaFullBodyJointSetValue = 1000274000;
+constexpr uint32_t kMetaFullBodyJointCount = 84;
+constexpr XrStructureType kMetaFullBodySystemPropertiesType =
+    static_cast<XrStructureType>(1000274000);
+
+struct SystemPropertiesFullBodyMETACompat {
+    XrStructureType type;
+    void* next;
+    XrBool32 supportsFullBodyTracking;
+};
 
 struct HandActions {
     XrAction pose = XR_NULL_HANDLE;
@@ -76,6 +87,19 @@ struct AppState {
     std::array<HandActions, 2> handActions{};
     std::array<XrSpace, 2> handSpaces{XR_NULL_HANDLE, XR_NULL_HANDLE};
     bool hasHandActions = false;
+    bool hasHandTracking = false;
+    PFN_xrCreateHandTrackerEXT createHandTracker = nullptr;
+    PFN_xrDestroyHandTrackerEXT destroyHandTracker = nullptr;
+    PFN_xrLocateHandJointsEXT locateHandJoints = nullptr;
+    std::array<XrHandTrackerEXT, 2> handTrackers{XR_NULL_HANDLE, XR_NULL_HANDLE};
+    bool hasBodyTracking = false;
+    bool hasMetaFullBodyExtension = false;
+    uint32_t bodyJointCount = 0;
+    PFN_xrCreateBodyTrackerFB createBodyTracker = nullptr;
+    PFN_xrDestroyBodyTrackerFB destroyBodyTracker = nullptr;
+    PFN_xrLocateBodyJointsFB locateBodyJoints = nullptr;
+    XrBodyTrackerFB bodyTracker = XR_NULL_HANDLE;
+    std::array<XrBodyJointLocationFB, kMetaFullBodyJointCount> bodyJoints{};
     XrSessionState state = XR_SESSION_STATE_UNKNOWN;
     bool sessionBegun = false;
     bool exitRequested = false;
@@ -95,6 +119,7 @@ struct AppState {
     kitvr::StreamConfig cfg;
 
     bool micRequested = false;
+    bool waitMusicFaded = false;
     uint64_t lastPermCheckUs = 0;
 
     kitvr::Session net;
@@ -147,6 +172,17 @@ std::string resolveHost(android_app* app) {
         h = kDefaultHost;
     }
     return h;
+}
+
+void fadeWaitingMusic(android_app* app) {
+    JNIEnv* env = nullptr;
+    if (app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return;
+    jobject activity = app->activity->clazz;
+    jclass activityClass = env->GetObjectClass(activity);
+    jmethodID fade = env->GetMethodID(activityClass, "fadeWaitingMusic", "()V");
+    if (fade) env->CallVoidMethod(activity, fade);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(activityClass);
 }
 
 // ---------------------------------------------------------------- microphone permission
@@ -223,6 +259,13 @@ bool createInstance(AppState& S) {
         exts.push_back(XR_FB_ANDROID_SURFACE_SWAPCHAIN_CREATE_EXTENSION_NAME);
         S.hasFbSurfaceCreate = true;
     }
+    const bool handTrackingAvailable = has(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+    S.hasHandTracking = handTrackingAvailable;
+    if (handTrackingAvailable) exts.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+    const bool bodyTrackingAvailable = has(XR_FB_BODY_TRACKING_EXTENSION_NAME);
+    if (bodyTrackingAvailable) exts.push_back(XR_FB_BODY_TRACKING_EXTENSION_NAME);
+    S.hasMetaFullBodyExtension = bodyTrackingAvailable && has(kMetaFullBodyExtensionName);
+    if (S.hasMetaFullBodyExtension) exts.push_back(kMetaFullBodyExtensionName);
 
     XrInstanceCreateInfoAndroidKHR androidInfo{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     androidInfo.applicationVM = S.app->activity->vm;
@@ -238,6 +281,46 @@ bool createInstance(AppState& S) {
     ci.enabledExtensionCount = static_cast<uint32_t>(exts.size());
     ci.enabledExtensionNames = exts.data();
     CHECK(xrCreateInstance(&ci, &S.instance));
+
+    if (handTrackingAvailable) {
+        if (XR_FAILED(xrGetInstanceProcAddr(S.instance, "xrCreateHandTrackerEXT",
+                                            reinterpret_cast<PFN_xrVoidFunction*>(&S.createHandTracker))) ||
+            XR_FAILED(xrGetInstanceProcAddr(S.instance, "xrDestroyHandTrackerEXT",
+                                            reinterpret_cast<PFN_xrVoidFunction*>(&S.destroyHandTracker))) ||
+            XR_FAILED(xrGetInstanceProcAddr(S.instance, "xrLocateHandJointsEXT",
+                                            reinterpret_cast<PFN_xrVoidFunction*>(&S.locateHandJoints)))) {
+            S.hasHandTracking = false;
+            LOGW("hand tracking extension functions unavailable");
+        } else {
+            S.hasHandTracking = true;
+        }
+    }
+
+    if (handTrackingAvailable) {
+        if (!S.hasHandTracking) {
+            LOGW("hand tracking will use controller inputs when available");
+        }
+    }
+
+    if (bodyTrackingAvailable) {
+        const XrResult createResult = xrGetInstanceProcAddr(
+            S.instance, "xrCreateBodyTrackerFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&S.createBodyTracker));
+        const XrResult destroyResult = xrGetInstanceProcAddr(
+            S.instance, "xrDestroyBodyTrackerFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&S.destroyBodyTracker));
+        const XrResult locateResult = xrGetInstanceProcAddr(
+            S.instance, "xrLocateBodyJointsFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&S.locateBodyJoints));
+        S.hasBodyTracking = XR_SUCCEEDED(createResult) && XR_SUCCEEDED(destroyResult) &&
+                            XR_SUCCEEDED(locateResult);
+        if (!S.hasBodyTracking) {
+            S.createBodyTracker = nullptr;
+            S.destroyBodyTracker = nullptr;
+            S.locateBodyJoints = nullptr;
+            LOGW("body tracking extension functions unavailable");
+        }
+    }
 
     XrSystemGetInfo si{XR_TYPE_SYSTEM_GET_INFO};
     si.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
@@ -297,6 +380,104 @@ bool createSession(AppState& S) {
     CHECK(xrCreateReferenceSpace(S.session, &rs, &S.localSpace));
     rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     CHECK(xrCreateReferenceSpace(S.session, &rs, &S.viewSpace));
+    return true;
+}
+
+bool createHandTrackers(AppState& S) {
+    if (!S.hasHandTracking) return true;
+    for (size_t i = 0; i < S.handTrackers.size(); ++i) {
+        XrHandTrackerCreateInfo info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+        info.hand = i == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+        info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+        if (XR_FAILED(S.createHandTracker(S.session, &info, &S.handTrackers[i]))) {
+            LOGW("hand tracking unavailable for hand %u", static_cast<unsigned>(i));
+            for (XrHandTrackerEXT& tracker : S.handTrackers) {
+                if (tracker != XR_NULL_HANDLE) S.destroyHandTracker(tracker);
+                tracker = XR_NULL_HANDLE;
+            }
+            S.hasHandTracking = false;
+            return true;
+        }
+    }
+    LOGI("OpenXR hand tracking enabled");
+    return true;
+}
+
+bool createBodyTracker(AppState& S) {
+    if (!S.hasBodyTracking) return true;
+
+    XrSystemBodyTrackingPropertiesFB bodyProperties{XR_TYPE_SYSTEM_BODY_TRACKING_PROPERTIES_FB};
+    SystemPropertiesFullBodyMETACompat fullBodyProperties{};
+    if (S.hasMetaFullBodyExtension) {
+        fullBodyProperties.type = kMetaFullBodySystemPropertiesType;
+        bodyProperties.next = &fullBodyProperties;
+    }
+    XrSystemProperties systemProperties{XR_TYPE_SYSTEM_PROPERTIES};
+    systemProperties.next = &bodyProperties;
+    if (XR_FAILED(xrGetSystemProperties(S.instance, S.systemId, &systemProperties)) ||
+        !bodyProperties.supportsBodyTracking) {
+        S.hasBodyTracking = false;
+        return true;
+    }
+
+    XrBodyJointSetFB jointSet = XR_BODY_JOINT_SET_DEFAULT_FB;
+    S.bodyJointCount = XR_BODY_JOINT_COUNT_FB;
+    if (S.hasMetaFullBodyExtension && fullBodyProperties.supportsFullBodyTracking) {
+        jointSet = static_cast<XrBodyJointSetFB>(kMetaFullBodyJointSetValue);
+        S.bodyJointCount = kMetaFullBodyJointCount;
+    }
+
+    XrBodyTrackerCreateInfoFB info{XR_TYPE_BODY_TRACKER_CREATE_INFO_FB};
+    info.bodyJointSet = jointSet;
+    if (XR_FAILED(S.createBodyTracker(S.session, &info, &S.bodyTracker))) {
+        S.bodyJointCount = 0;
+        S.hasBodyTracking = false;
+        LOGW("could not create Meta body tracker; continuing without body tracking");
+        return true;
+    }
+    LOGI("body tracking enabled with %u joints", S.bodyJointCount);
+    return true;
+}
+
+bool createHandTrackers(AppState& S) {
+    if (!S.hasHandTracking) return true;
+    for (size_t i = 0; i < S.handTrackers.size(); ++i) {
+        XrHandTrackerCreateInfoEXT info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+        info.hand = i == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+        info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+        if (XR_FAILED(S.createHandTracker(S.session, &info, &S.handTrackers[i]))) {
+            LOGW("could not create hand tracker %u; controller inputs remain available",
+                 static_cast<unsigned>(i));
+            for (XrHandTrackerEXT& tracker : S.handTrackers) {
+                if (tracker != XR_NULL_HANDLE) S.destroyHandTracker(tracker);
+                tracker = XR_NULL_HANDLE;
+            }
+            S.hasHandTracking = false;
+            return true;
+        }
+    }
+    LOGI("OpenXR hand tracking enabled");
+    return true;
+}
+
+bool createHandTrackers(AppState& S) {
+    if (!S.hasHandTracking) return true;
+    for (size_t i = 0; i < S.handTrackers.size(); ++i) {
+        XrHandTrackerCreateInfoEXT info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+        info.hand = i == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+        info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+        if (XR_FAILED(S.createHandTracker(S.session, &info, &S.handTrackers[i]))) {
+            LOGW("could not create hand tracker %u; controller inputs remain available",
+                 static_cast<unsigned>(i));
+            for (XrHandTrackerEXT& tracker : S.handTrackers) {
+                if (tracker != XR_NULL_HANDLE) S.destroyHandTracker(tracker);
+                tracker = XR_NULL_HANDLE;
+            }
+            S.hasHandTracking = false;
+            return true;
+        }
+    }
+    LOGI("OpenXR hand tracking enabled");
     return true;
 }
 
@@ -458,7 +639,107 @@ kitvr::TrackingHand readHand(AppState& S, size_t index, XrTime displayTime) {
     if (actionBoolean(S, actions.secondary, path)) hand.buttons |= 1u << 3;
     if (actionBoolean(S, actions.menu, path)) hand.buttons |= 1u << 4;
     if (actionBoolean(S, actions.thumbstickClick, path)) hand.buttons |= 1u << 5;
+
+    if (!hand.active && S.hasHandTracking && S.handTrackers[index] != XR_NULL_HANDLE) {
+        std::array<XrHandJointLocationEXT, XR_HAND_JOINT_COUNT_EXT> joints{};
+        XrHandJointLocationsEXT locations{XR_TYPE_HAND_JOINT_LOCATIONS_EXT};
+        locations.jointCount = static_cast<uint32_t>(joints.size());
+        locations.jointLocations = joints.data();
+        XrHandJointsLocateInfoEXT locate{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT};
+        locate.baseSpace = S.localSpace;
+        locate.time = displayTime;
+        if (XR_SUCCEEDED(S.locateHandJoints(S.handTrackers[index], &locate, &locations)) &&
+            locations.isActive) {
+            const auto& palm = joints[XR_HAND_JOINT_PALM_EXT];
+            const auto& thumbTip = joints[XR_HAND_JOINT_THUMB_TIP_EXT];
+            const auto& indexTip = joints[XR_HAND_JOINT_INDEX_TIP_EXT];
+            const XrSpaceLocationFlags required = XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                                                  XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+            if ((palm.locationFlags & required) == required &&
+                (thumbTip.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                (indexTip.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+                hand.active = true;
+                hand.pose[0] = palm.pose.position.x;
+                hand.pose[1] = palm.pose.position.y;
+                hand.pose[2] = palm.pose.position.z;
+                hand.pose[3] = palm.pose.orientation.x;
+                hand.pose[4] = palm.pose.orientation.y;
+                hand.pose[5] = palm.pose.orientation.z;
+                hand.pose[6] = palm.pose.orientation.w;
+                const float dx = thumbTip.pose.position.x - indexTip.pose.position.x;
+                const float dy = thumbTip.pose.position.y - indexTip.pose.position.y;
+                const float dz = thumbTip.pose.position.z - indexTip.pose.position.z;
+                const float pinch = std::sqrt(dx * dx + dy * dy + dz * dz);
+                hand.trigger = std::clamp((0.045f - pinch) / 0.03f, 0.0f, 1.0f);
+                constexpr XrHandJointEXT fingerTips[] = {
+                    XR_HAND_JOINT_INDEX_TIP_EXT,
+                    XR_HAND_JOINT_MIDDLE_TIP_EXT,
+                    XR_HAND_JOINT_RING_TIP_EXT,
+                    XR_HAND_JOINT_LITTLE_TIP_EXT,
+                };
+                float averageCurl = 0.0f;
+                for (XrHandJointEXT tip : fingerTips) {
+                    const auto& location = joints[tip];
+                    const float x = location.pose.position.x - palm.pose.position.x;
+                    const float y = location.pose.position.y - palm.pose.position.y;
+                    const float z = location.pose.position.z - palm.pose.position.z;
+                    averageCurl += std::sqrt(x * x + y * y + z * z) /
+                                   static_cast<float>(std::size(fingerTips));
+                }
+                hand.grip = std::clamp((0.105f - averageCurl) / 0.065f, 0.0f, 1.0f);
+                if (hand.trigger > 0.75f) hand.buttons |= (1u << 0) | (1u << 2);
+                if (hand.grip > 0.75f) hand.buttons |= 1u << 1;
+            }
+        }
+    }
     return hand;
+}
+
+bool readBodyTracking(AppState& S, XrTime displayTime, float joints[kitvr::kBodyTrackingJointCount][7],
+                      uint16_t& activeMask) {
+    activeMask = 0;
+    if (!S.hasBodyTracking || S.bodyTracker == XR_NULL_HANDLE || S.bodyJointCount == 0) return false;
+
+    XrBodyJointsLocateInfoFB locate{XR_TYPE_BODY_JOINTS_LOCATE_INFO_FB};
+    locate.baseSpace = S.localSpace;
+    locate.time = displayTime;
+    XrBodyJointLocationsFB locations{XR_TYPE_BODY_JOINT_LOCATIONS_FB};
+    locations.jointCount = S.bodyJointCount;
+    locations.jointLocations = S.bodyJoints.data();
+    if (XR_FAILED(S.locateBodyJoints(S.bodyTracker, &locate, &locations)) || !locations.isActive) {
+        return false;
+    }
+
+    constexpr uint32_t sourceJoints[kitvr::kBodyTrackingJointCount] = {
+        XR_BODY_JOINT_HIPS_FB,
+        XR_BODY_JOINT_CHEST_FB,
+        71,  // XR_FULL_BODY_JOINT_LEFT_LOWER_LEG_META
+        78,  // XR_FULL_BODY_JOINT_RIGHT_LOWER_LEG_META
+        73,  // XR_FULL_BODY_JOINT_LEFT_FOOT_ANKLE_META
+        80,  // XR_FULL_BODY_JOINT_RIGHT_FOOT_ANKLE_META
+    };
+    const XrSpaceLocationFlags required = XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                                          XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    for (size_t i = 0; i < kitvr::kBodyTrackingJointCount; ++i) {
+        const uint32_t source = sourceJoints[i];
+        if (source >= locations.jointCount) continue;
+        const auto& location = locations.jointLocations[source];
+        if ((location.locationFlags & required) != required) continue;
+        const float values[7] = {
+            location.pose.position.x, location.pose.position.y, location.pose.position.z,
+            location.pose.orientation.x, location.pose.orientation.y,
+            location.pose.orientation.z, location.pose.orientation.w,
+        };
+        bool finite = true;
+        for (size_t j = 0; j < 7; ++j) finite &= std::isfinite(values[j]);
+        const float norm = std::sqrt(values[3] * values[3] + values[4] * values[4] +
+                                     values[5] * values[5] + values[6] * values[6]);
+        if (!finite || norm <= 1e-6f) continue;
+        for (size_t j = 0; j < 3; ++j) joints[i][j] = values[j];
+        for (size_t j = 3; j < 7; ++j) joints[i][j] = values[j] / norm;
+        activeMask |= static_cast<uint16_t>(1u << i);
+    }
+    return activeMask != 0;
 }
 
 // ---------------------------------------------------------------- video lifecycle
@@ -616,6 +897,14 @@ void renderFrame(AppState& S) {
             }
         }
         S.net.sendTracking(kitvr::nowUs(), head, left, right);
+        if (S.hasBodyTracking) {
+            float bodyJoints[kitvr::kBodyTrackingJointCount][7]{};
+            for (auto& joint : bodyJoints) joint[6] = 1.0f;
+            uint16_t activeBodyJoints = 0;
+            if (readBodyTracking(S, fs.predictedDisplayTime, bodyJoints, activeBodyJoints)) {
+                S.net.sendBodyTracking(kitvr::nowUs(), activeBodyJoints, bodyJoints);
+            }
+        }
     }
 
     XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -646,6 +935,14 @@ void renderFrame(AppState& S) {
 void cleanup(AppState& S) {
     S.net.shutdown();
     teardownVideo(S);
+    if (S.bodyTracker != XR_NULL_HANDLE && S.destroyBodyTracker) {
+        S.destroyBodyTracker(S.bodyTracker);
+        S.bodyTracker = XR_NULL_HANDLE;
+    }
+    for (XrHandTrackerEXT& tracker : S.handTrackers) {
+        if (tracker != XR_NULL_HANDLE && S.destroyHandTracker) S.destroyHandTracker(tracker);
+        tracker = XR_NULL_HANDLE;
+    }
     for (XrSpace& space : S.handSpaces) {
         if (space != XR_NULL_HANDLE) xrDestroySpace(space);
         space = XR_NULL_HANDLE;
@@ -680,6 +977,12 @@ void android_main(android_app* app) {
         ANativeActivity_finish(app->activity);
         return;
     }
+    if (!createHandTrackers(S)) {
+        LOGW("hand tracking setup failed; continuing without it");
+    }
+    if (!createBodyTracker(S)) {
+        LOGW("body tracking setup failed; continuing without it");
+    }
     if (!createActions(S)) LOGW("controller actions unavailable; continuing with head tracking");
     S.net.startControl(host);
 
@@ -695,6 +998,10 @@ void android_main(android_app* app) {
         pollXrEvents(S);
         maintainVideo(S);
         maintainAudio(S);
+        if (!S.waitMusicFaded && S.net.videoHasRenderedFrame()) {
+            fadeWaitingMusic(app);
+            S.waitMusicFaded = true;
+        }
         if (S.sessionBegun) renderFrame(S);
     }
 

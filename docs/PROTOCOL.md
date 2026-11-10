@@ -9,7 +9,7 @@ The reference implementation of the parts marked "implemented" is `crates/proto`
 |---|---|---|---|---|
 | Discovery | mDNS | 5353 | server announces | Find the PC |
 | Control | TCP | 9943 | both | Handshake, config, loss recovery, keepalive |
-| Media | UDP | 9944 | video: server to client, tracking: client to server | Low-latency data |
+| Media | UDP | 9944 | video: server to client, tracking/body: client to server | Low-latency data |
 
 ## Discovery
 
@@ -120,6 +120,26 @@ Hand block: `u16 buttons`, `u16 flags` (bit0 = active), `f32 trigger`, `f32 grip
 The Quest client fills in the head pose and, when Touch controllers are active, sends their grip
 poses, trigger, squeeze, thumbstick, and basic buttons in the hand blocks. SteamVR controller
 support is experimental; desktop-mode pointer input remains separate.
+
+## Body-tracking packets (optional)
+
+When the OpenXR runtime exposes Meta's full-body joint set, the Quest may send a 184-byte body
+packet alongside normal tracking packets. The server validates and forwards it only to the local
+SteamVR driver on UDP port 9945.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | type, 5 = body tracking |
+| 1 | u8 | packet version, 1 |
+| 2 | u16 | sequence |
+| 4 | u64 | timestamp_us |
+| 12 | u16 | active joint mask |
+| 14 | u16 | reserved, 0 |
+| 16 | 6 x 28 bytes | hips, chest, left knee, right knee, left ankle, right ankle poses |
+
+Each pose is position xyz and orientation quaternion xyzw as seven little-endian `f32` values.
+Only joints whose active-mask bit is set are valid. Runtimes without Meta's full-body extension
+may report torso joints only; unsupported lower-body points remain inactive.
 
 ## Security
 

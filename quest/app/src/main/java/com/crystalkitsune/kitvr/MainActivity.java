@@ -3,6 +3,7 @@ package com.crystalkitsune.kitvr;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -18,6 +19,7 @@ import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.content.Context;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -36,6 +38,7 @@ import java.io.ByteArrayOutputStream;
 import java.net.Inet4Address;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.HashSet;
@@ -45,6 +48,9 @@ public final class MainActivity extends Activity {
     private static final String RELEASE_URL =
             "https://api.github.com/repos/Crystal-Kitsune-Studios/KitVR/releases/latest";
     private static final String APK_ASSET = "app-release.apk";
+    private static final int REQUEST_TRACKING_PERMISSIONS = 3;
+    private static final String HAND_TRACKING_PERMISSION = "com.oculus.permission.HAND_TRACKING";
+    private static final String BODY_TRACKING_PERMISSION = "com.oculus.permission.BODY_TRACKING";
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private EditText hostInput;
     private TextView status;
@@ -55,6 +61,7 @@ public final class MainActivity extends Activity {
     private NsdManager.DiscoveryListener discoveryListener;
     private TextView discoveryStatus;
     private Button discoveryButton;
+    private String pendingHost;
     private final Set<String> discoveredHosts = new HashSet<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable discoveryTimeout = () -> {
@@ -128,6 +135,15 @@ public final class MainActivity extends Activity {
         content.addView(discoveryRow, discoveryParams);
         discoveryButton.setOnClickListener(v -> discoverServers());
 
+        CheckBox waitingMusic = new CheckBox(this);
+        waitingMusic.setText("Play music while waiting for video");
+        waitingMusic.setTextColor(Color.rgb(190, 203, 198));
+        waitingMusic.setButtonTintList(android.content.res.ColorStateList.valueOf(accent));
+        waitingMusic.setChecked(getPreferences(MODE_PRIVATE).getBoolean("waiting_music", true));
+        content.addView(waitingMusic);
+        waitingMusic.setOnCheckedChangeListener((button, checked) ->
+            getPreferences(MODE_PRIVATE).edit().putBoolean("waiting_music", checked).apply());
+
         Button connect = button("Connect", accent, background);
         LinearLayout.LayoutParams connectParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
@@ -170,10 +186,38 @@ public final class MainActivity extends Activity {
         getPreferences(MODE_PRIVATE).edit().putString("host", host).apply();
         ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE))
                 .hideSoftInputFromWindow(hostInput.getWindowToken(), 0);
+        ArrayList<String> missingPermissions = new ArrayList<>();
+        if (checkSelfPermission(HAND_TRACKING_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
+            missingPermissions.add(HAND_TRACKING_PERMISSION);
+        }
+        if (checkSelfPermission(BODY_TRACKING_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
+            missingPermissions.add(BODY_TRACKING_PERMISSION);
+        }
+        if (!missingPermissions.isEmpty()) {
+            pendingHost = host;
+            status.setText("Allow optional hand/body tracking, or deny and continue with controllers.");
+            requestPermissions(missingPermissions.toArray(new String[0]), REQUEST_TRACKING_PERMISSIONS);
+            return;
+        }
+        launchNative(host);
+    }
+
+    private void launchNative(String host) {
         status.setText("Starting KitVR. Make sure the KitVR server is running on " + host + ".");
         Intent intent = new Intent(this, android.app.NativeActivity.class);
         intent.putExtra("host", host);
+        intent.putExtra("waiting_music", getPreferences(MODE_PRIVATE).getBoolean("waiting_music", true));
         startActivity(intent);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_TRACKING_PERMISSIONS && pendingHost != null) {
+            String host = pendingHost;
+            pendingHost = null;
+            launchNative(host);
+        }
     }
 
     private void discoverServers() {

@@ -32,10 +32,13 @@ public:
     bool startMedia(const StreamConfig& cfg, ANativeWindow* window);
     void stopMedia();
     bool mediaRunning() const { return mediaRunning_; }
+    bool videoHasRenderedFrame() const { return decoder_.hasRenderedFrame(); }
 
     // The first tracking packet tells the server where to send video.
     void sendTracking(uint64_t tsUs, const float head[7], const TrackingHand& left,
                       const TrackingHand& right);
+    void sendBodyTracking(uint64_t tsUs, uint16_t activeMask,
+                          const float joints[kBodyTrackingJointCount][7]);
 
     // Call once per frame from the main thread. Starts audio streams when they are due.
     void tick();
@@ -68,6 +71,7 @@ private:
     std::thread mediaThread_;
     VideoDecoder decoder_;
     std::atomic<uint16_t> trackSeq_{0};
+    std::atomic<uint16_t> bodySeq_{0};
 
     Audio audio_;
     std::atomic<bool> micAllowed_{false};

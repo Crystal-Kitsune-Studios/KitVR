@@ -15,8 +15,11 @@ constexpr uint16_t kMediaPort = 9944;    // UDP
 
 constexpr size_t kVideoHeaderLen = 24;
 constexpr size_t kTrackingLen = 136;
+constexpr size_t kBodyTrackingJointCount = 6;
+constexpr size_t kBodyTrackingLen = 16 + kBodyTrackingJointCount * 28;
 constexpr uint8_t kPacketVideo = 1;
 constexpr uint8_t kPacketTracking = 2;
+constexpr uint8_t kPacketBodyTracking = 5;
 constexpr uint8_t kPacketAudioDown = 3;  // PC audio to the headset
 constexpr uint8_t kPacketAudioUp = 4;    // microphone to the PC
 constexpr size_t kAudioHeaderLen = 16;
@@ -258,6 +261,22 @@ inline std::vector<uint8_t> encodeTracking(uint16_t seq, uint64_t tsUs, const fl
         for (float value : hand->pose) putF32(v, value);
     }
     v.resize(kTrackingLen, 0);
+    return v;
+}
+
+inline std::vector<uint8_t> encodeBodyTracking(uint16_t seq, uint64_t tsUs, uint16_t activeMask,
+                                               const float joints[kBodyTrackingJointCount][7]) {
+    std::vector<uint8_t> v;
+    v.reserve(kBodyTrackingLen);
+    v.push_back(kPacketBodyTracking);
+    v.push_back(1);  // body packet format version
+    put16(v, seq);
+    put64(v, tsUs);
+    put16(v, activeMask);
+    put16(v, 0);
+    for (size_t joint = 0; joint < kBodyTrackingJointCount; ++joint) {
+        for (size_t value = 0; value < 7; ++value) putF32(v, joints[joint][value]);
+    }
     return v;
 }
 

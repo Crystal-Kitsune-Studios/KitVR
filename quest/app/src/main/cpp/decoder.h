@@ -26,6 +26,7 @@ public:
     // Queues one access unit. Returns false if the queue overflowed and was cleared;
     // the caller must then wait for the next keyframe because references are broken.
     bool submit(std::vector<uint8_t>&& data, bool keyframe, int64_t ptsUs);
+    bool hasRenderedFrame() const { return firstFrameRendered_.load(); }
 
     void stop();
 
@@ -41,6 +42,7 @@ private:
     AMediaCodec* codec_ = nullptr;
     std::thread thread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> firstFrameRendered_{false};
     std::mutex m_;
     std::condition_variable cv_;
     std::deque<Au> queue_;

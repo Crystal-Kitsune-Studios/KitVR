@@ -18,6 +18,7 @@ constexpr uint32_t kBufferFlagKeyFrame = 1;  // MediaCodec.BUFFER_FLAG_KEY_FRAME
 
 bool VideoDecoder::start(ANativeWindow* window, const char* mime, int width, int height, int fps) {
     stop();
+    firstFrameRendered_ = false;
     codec_ = AMediaCodec_createDecoderByType(mime);
     if (!codec_) {
         LOGE("no decoder for %s", mime);
@@ -100,6 +101,7 @@ void VideoDecoder::loop() {
             ssize_t o = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
             if (o >= 0) {
                 AMediaCodec_releaseOutputBuffer(codec_, static_cast<size_t>(o), true);
+                if (info.size > 0) firstFrameRendered_ = true;
                 continue;
             }
             if (o == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED ||

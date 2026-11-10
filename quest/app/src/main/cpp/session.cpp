@@ -239,6 +239,13 @@ void Session::sendTracking(uint64_t tsUs, const float head[7], const TrackingHan
     send(udpFd_, pkt.data(), pkt.size(), 0);
 }
 
+void Session::sendBodyTracking(uint64_t tsUs, uint16_t activeMask,
+                               const float joints[kBodyTrackingJointCount][7]) {
+    if (!mediaRunning_ || udpFd_ < 0 || activeMask == 0) return;
+    const std::vector<uint8_t> pkt = encodeBodyTracking(bodySeq_++, tsUs, activeMask, joints);
+    send(udpFd_, pkt.data(), pkt.size(), 0);
+}
+
 void Session::mediaLoop() {
     struct FrameAsm {
         uint32_t id = 0;
