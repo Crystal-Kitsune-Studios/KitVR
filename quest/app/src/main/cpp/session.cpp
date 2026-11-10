@@ -232,9 +232,10 @@ void Session::onMicFrame(const int16_t* samples, size_t count) {
     send(udpFd_, pkt.data(), pkt.size(), 0);
 }
 
-void Session::sendTracking(uint64_t tsUs, const float head[7]) {
+void Session::sendTracking(uint64_t tsUs, const float head[7], const TrackingHand& left,
+                           const TrackingHand& right) {
     if (!mediaRunning_ || udpFd_ < 0) return;
-    std::vector<uint8_t> pkt = encodeTracking(trackSeq_++, tsUs, head);
+    std::vector<uint8_t> pkt = encodeTracking(trackSeq_++, tsUs, head, left, right);
     send(udpFd_, pkt.data(), pkt.size(), 0);
 }
 

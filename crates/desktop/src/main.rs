@@ -20,6 +20,7 @@ const FRAME_RATES: &[u32] = &[60, 72, 90];
 const RELEASE_API: &str =
     "https://api.github.com/repos/Crystal-Kitsune-Studios/KitVR/releases/latest";
 const WELCOME_STORAGE_KEY: &str = "kitvr.desktop.welcome_completed";
+const SETTINGS_STORAGE_KEY: &str = "kitvr.desktop.settings";
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -58,17 +59,57 @@ struct KitVrApp {
     update_rx: Receiver<ReleaseCheck>,
     update_offer: Option<UpdateOffer>,
     update_message: String,
+    update_action_tx: Sender<UpdateAction>,
+    update_action_rx: Receiver<UpdateAction>,
+    restart_for_update: bool,
+    update_in_progress: bool,
 }
 
 struct UpdateOffer {
     version: String,
     url: String,
+    asset_name: String,
 }
 
 enum ReleaseCheck {
     Current(String),
     Available(UpdateOffer),
     Failed(String),
+}
+
+enum UpdateAction {
+    Restarting,
+    Failed(String),
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct SavedSettings {
+    source: String,
+    file_path: String,
+    encoder: String,
+    resolution: String,
+    fps: u32,
+    bitrate_kbps: u32,
+    audio_enabled: bool,
+    audio_device: String,
+    microphone_device: String,
+}
+
+impl Default for SavedSettings {
+    fn default() -> Self {
+        Self {
+            source: "Test pattern".to_string(),
+            file_path: String::new(),
+            encoder: "libx265".to_string(),
+            resolution: RESOLUTIONS[0].to_string(),
+            fps: 60,
+            bitrate_kbps: 40_000,
+            audio_enabled: true,
+            audio_device: "default".to_string(),
+            microphone_device: String::new(),
+        }
+    }
 }
 
 impl KitVrApp {
@@ -86,21 +127,27 @@ impl KitVrApp {
 
         let (log_tx, log_rx) = mpsc::channel();
         let (update_tx, update_rx) = mpsc::channel();
+        let (update_action_tx, update_action_rx) = mpsc::channel();
         let tutorial_completed = cc
             .storage
             .and_then(|storage| storage.get_string(WELCOME_STORAGE_KEY))
             .is_some_and(|value| value == "true");
+        let settings = cc
+            .storage
+            .and_then(|storage| storage.get_string(SETTINGS_STORAGE_KEY))
+            .and_then(|value| serde_json::from_str::<SavedSettings>(&value).ok())
+            .unwrap_or_default();
         let app = Self {
             host_ip: local_ip(),
-            source: "Test pattern".to_string(),
-            file_path: String::new(),
-            encoder: "libx265".to_string(),
-            resolution: RESOLUTIONS[0].to_string(),
-            fps: 60,
-            bitrate_kbps: 40_000,
-            audio_enabled: true,
-            audio_device: "default".to_string(),
-            microphone_device: String::new(),
+            source: settings.source,
+            file_path: settings.file_path,
+            encoder: settings.encoder,
+            resolution: settings.resolution,
+            fps: settings.fps,
+            bitrate_kbps: settings.bitrate_kbps,
+            audio_enabled: settings.audio_enabled,
+            audio_device: settings.audio_device,
+            microphone_device: settings.microphone_device,
             audio_devices: Vec::new(),
             child: None,
             log_tx,
@@ -113,6 +160,10 @@ impl KitVrApp {
             update_rx,
             update_offer: None,
             update_message: "Checking for updates...".to_string(),
+            update_action_tx,
+            update_action_rx,
+            restart_for_update: false,
+            update_in_progress: false,
         };
         thread::spawn(move || {
             let _ = update_tx.send(check_latest_release());
@@ -280,20 +331,88 @@ impl KitVrApp {
                 }
             }
         }
+        while let Ok(action) = self.update_action_rx.try_recv() {
+            match action {
+                UpdateAction::Restarting => {
+                    self.update_message = "Applying update and restarting…".to_string();
+                    self.restart_for_update = true;
+                }
+                UpdateAction::Failed(message) => {
+                    self.update_message = message;
+                    self.update_in_progress = false;
+                }
+            }
+        }
     }
 
-    fn open_update(&mut self) {
+    fn start_update(&mut self) {
+        if self.update_in_progress {
+            return;
+        }
+        if self.child.is_some() {
+            self.status = "Stop streaming before applying an update.".to_string();
+            return;
+        }
         let Some(offer) = self.update_offer.as_ref() else {
             return;
         };
-        match webbrowser::open(&offer.url) {
-            Ok(()) => {
-                self.status = format!("Opened KitVR v{} download in your browser.", offer.version);
-            }
-            Err(error) => {
-                self.status = format!("Could not open the update page: {error}");
-            }
+        let Some(executable) = std::env::current_exe().ok() else {
+            self.status = "Could not locate KitVR Desktop.".to_string();
+            return;
+        };
+        let Some(install_dir) = executable.parent().map(PathBuf::from) else {
+            self.status = "Could not locate the installation folder.".to_string();
+            return;
+        };
+        let updater_name = if cfg!(windows) {
+            "kitvr-updater.exe"
+        } else {
+            "kitvr-updater"
+        };
+        let updater = install_dir.join(updater_name);
+        if !updater.is_file() {
+            self.status =
+                "Update helper is missing. Download the package from the release page.".to_string();
+            let _ = webbrowser::open(&offer.url);
+            return;
         }
+        let mode = if cfg!(windows) { "windows" } else { "appimage" };
+        let target = if cfg!(windows) {
+            install_dir.clone()
+        } else if let Some(path) = std::env::var_os("APPIMAGE") {
+            PathBuf::from(path)
+        } else {
+            self.status = "For local builds, update from the GitHub release page.".to_string();
+            let _ = webbrowser::open(&offer.url);
+            return;
+        };
+        let version = offer.version.clone();
+        let download_url = offer.url.clone();
+        let asset_name = offer.asset_name.clone();
+        let action_tx = self.update_action_tx.clone();
+        self.update_in_progress = true;
+        self.update_message = format!("Downloading v{version}…");
+        self.status = format!("Downloading KitVR v{version}.");
+        thread::spawn(move || {
+            let result = download_update(&download_url, &asset_name).and_then(|package| {
+                Command::new(updater)
+                    .arg(mode)
+                    .arg(std::process::id().to_string())
+                    .arg(package)
+                    .arg(target)
+                    .spawn()
+                    .map_err(|error| error.to_string())
+            });
+            match result {
+                Ok(_) => {
+                    let _ = action_tx.send(UpdateAction::Restarting);
+                }
+                Err(message) => {
+                    let _ =
+                        action_tx.send(UpdateAction::Failed(format!("Update failed: {message}")));
+                }
+            }
+        });
     }
 
     fn close_tutorial(&mut self) {
@@ -305,10 +424,28 @@ impl KitVrApp {
 impl eframe::App for KitVrApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(WELCOME_STORAGE_KEY, self.tutorial_completed.to_string());
+        let settings = SavedSettings {
+            source: self.source.clone(),
+            file_path: self.file_path.clone(),
+            encoder: self.encoder.clone(),
+            resolution: self.resolution.clone(),
+            fps: self.fps,
+            bitrate_kbps: self.bitrate_kbps,
+            audio_enabled: self.audio_enabled,
+            audio_device: self.audio_device.clone(),
+            microphone_device: self.microphone_device.clone(),
+        };
+        if let Ok(value) = serde_json::to_string(&settings) {
+            storage.set_string(SETTINGS_STORAGE_KEY, value);
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_server();
+        if self.restart_for_update {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         ctx.request_repaint_after(Duration::from_millis(150));
 
         egui::TopBottomPanel::top("header")
@@ -334,8 +471,19 @@ impl eframe::App for KitVrApp {
                             .as_ref()
                             .map(|offer| offer.version.clone())
                         {
-                            if ui.small_button("Get update").clicked() {
-                                self.open_update();
+                            let update_label = if self.update_in_progress {
+                                "Updating…"
+                            } else {
+                                "Get update"
+                            };
+                            if ui
+                                .add_enabled(
+                                    !self.update_in_progress,
+                                    egui::Button::new(update_label).small(),
+                                )
+                                .clicked()
+                            {
+                                self.start_update();
                             }
                             ui.label(
                                 RichText::new(format!("Update · v{version}"))
@@ -815,13 +963,33 @@ fn check_latest_release() -> ReleaseCheck {
                     .flatten()
             })
         });
-    let url = asset_url
-        .or_else(|| release.get("html_url").and_then(|value| value.as_str()))
-        .unwrap_or("https://github.com/Crystal-Kitsune-Studios/KitVR/releases/latest");
+    let Some(url) = asset_url else {
+        return ReleaseCheck::Failed("No update package found for this platform".to_string());
+    };
     ReleaseCheck::Available(UpdateOffer {
         version: latest_version.to_string(),
         url: url.to_string(),
+        asset_name: asset_name.to_string(),
     })
+}
+
+fn download_update(url: &str, asset_name: &str) -> Result<PathBuf, String> {
+    let response = ureq::get(url)
+        .set("User-Agent", "KitVR-Desktop")
+        .call()
+        .map_err(|error| error.to_string())?;
+    let path =
+        std::env::temp_dir().join(format!("kitvr-update-{}-{asset_name}", std::process::id()));
+    let mut file = std::fs::File::create(&path).map_err(|error| error.to_string())?;
+    std::io::copy(&mut response.into_reader(), &mut file).map_err(|error| error.to_string())?;
+    if std::fs::metadata(&path)
+        .map_err(|error| error.to_string())?
+        .len()
+        == 0
+    {
+        return Err("Downloaded update package was empty".to_string());
+    }
+    Ok(path)
 }
 
 #[cfg(test)]

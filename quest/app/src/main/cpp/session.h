@@ -33,8 +33,9 @@ public:
     void stopMedia();
     bool mediaRunning() const { return mediaRunning_; }
 
-    // head = {px, py, pz, qx, qy, qz, qw}. The first packet tells the server where to send video.
-    void sendTracking(uint64_t tsUs, const float head[7]);
+    // The first tracking packet tells the server where to send video.
+    void sendTracking(uint64_t tsUs, const float head[7], const TrackingHand& left,
+                      const TrackingHand& right);
 
     // Call once per frame from the main thread. Starts audio streams when they are due.
     void tick();

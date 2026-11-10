@@ -29,8 +29,8 @@ You need Rust, ffmpeg on your PATH, and a Quest with developer mode enabled.
    This streams ffmpeg's test pattern with software HEVC encoding, so it works on any machine.
    Set `KITVR_FFMPEG` if ffmpeg is not on PATH.
 
-2. Build and install the Quest app, then launch it with your PC's IP address.
-   See [quest/README.md](quest/README.md).
+2. Build and install the Quest app, launch it, and select **Find PCs** to discover the server.
+  You can still enter the PC's IP address manually. See [quest/README.md](quest/README.md).
 
 3. Stream your desktop instead of the test pattern, with a hardware encoder:
 
@@ -53,14 +53,13 @@ cargo build --release -p kitvr-desktop -p kitvr-server
 Run `target/release/kitvr-desktop` (or `kitvr-desktop.exe` on Windows). Choose a source and
 encoder, then start streaming; the GUI displays the PC address to enter in the Quest app and shows
 server output. FFmpeg must be installed and available on `PATH` (or set `KITVR_FFMPEG`). The
-existing `kitvr-server` command-line workflow remains available without the GUI. On first launch,
-the app walks through PC setup, network requirements, and connecting from the Quest; open **Tutorial**
-in the header to revisit it.
+existing `kitvr-server` command-line workflow remains available without the GUI. Stream choices are
+saved between launches. On first launch, the app walks through PC setup, network requirements, and
+connecting from the Quest; open **Tutorial** in the header to revisit it.
 
 The desktop app checks GitHub Releases on startup and offers the latest platform package when it
-finds a newer version. Updates download through your browser and require a manual install: close the
-app before replacing the Windows executables, or mark the downloaded Linux AppImage executable
-before launching it.
+finds a newer version. Choose **Get update** to download and apply it; the app stops its stream and
+restarts after replacement. SteamVR is not updated by this mechanism.
 
 GitHub Actions packages Windows as `KitVR-windows-x86_64.zip` (desktop and server executables
 together) and Linux as `KitVR-linux-x86_64.AppImage`. Both packages still require FFmpeg installed
@@ -68,9 +67,9 @@ on the PC; the AppImage bundles the GUI and KitVR server, not FFmpeg.
 
 SteamVR builds also publish a separate `KitVR-steamvr-driver-windows-x86_64.zip` or
 `KitVR-steamvr-driver-linux-x86_64.tar.gz`. This experimental HMD driver registers the headset and
-forwards Quest head poses into SteamVR over loopback UDP port 9945. It does not yet capture and
-stream SteamVR's stereo eye images, or expose controller input, so it is a tracking prototype and
-not yet a complete SteamVR streaming mode.
+forwards Quest head/controller poses and basic controller input into SteamVR over loopback UDP
+port 9945. It does not yet capture and stream SteamVR's stereo eye images, so it is not yet a
+complete SteamVR streaming mode.
 
 Build the tracking prototype locally with CMake 3.22 or newer:
 

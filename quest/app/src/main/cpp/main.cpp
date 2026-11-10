@@ -16,7 +16,10 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
+#include <algorithm>
 #include <cstring>
+#include <array>
+#include <cmath>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -40,6 +43,18 @@ constexpr float kQuadDistanceM = 2.0f;
 constexpr const char* kDefaultHost = "192.168.1.100";
 constexpr const char* kHostFile = "/sdcard/Android/data/com.crystalkitsune.kitvr/files/host.txt";
 
+struct HandActions {
+    XrAction pose = XR_NULL_HANDLE;
+    XrAction trigger = XR_NULL_HANDLE;
+    XrAction triggerClick = XR_NULL_HANDLE;
+    XrAction squeeze = XR_NULL_HANDLE;
+    XrAction thumbstick = XR_NULL_HANDLE;
+    XrAction thumbstickClick = XR_NULL_HANDLE;
+    XrAction primary = XR_NULL_HANDLE;
+    XrAction secondary = XR_NULL_HANDLE;
+    XrAction menu = XR_NULL_HANDLE;
+};
+
 struct AppState {
     android_app* app = nullptr;
 
@@ -48,6 +63,11 @@ struct AppState {
     XrSession session = XR_NULL_HANDLE;
     XrSpace localSpace = XR_NULL_HANDLE;
     XrSpace viewSpace = XR_NULL_HANDLE;
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    std::array<XrPath, 2> handPaths{XR_NULL_PATH, XR_NULL_PATH};
+    std::array<HandActions, 2> handActions{};
+    std::array<XrSpace, 2> handSpaces{XR_NULL_HANDLE, XR_NULL_HANDLE};
+    bool hasHandActions = false;
     XrSessionState state = XR_SESSION_STATE_UNKNOWN;
     bool sessionBegun = false;
     bool exitRequested = false;
@@ -272,6 +292,167 @@ bool createSession(AppState& S) {
     return true;
 }
 
+bool createHandAction(AppState& S, size_t handIndex, const char* actionName,
+                      const char* localizedName,
+                      XrActionType type, XrAction& action) {
+    XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
+    std::strncpy(info.actionName, actionName, XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(info.localizedActionName, localizedName, XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    info.actionType = type;
+    info.countSubactionPaths = 1;
+    info.subactionPaths = &S.handPaths[handIndex];
+    CHECK(xrCreateAction(S.actionSet, &info, &action));
+    return true;
+}
+
+bool addBinding(AppState& S, XrAction action, const char* path,
+                std::vector<XrActionSuggestedBinding>& bindings) {
+    XrPath xrPath = XR_NULL_PATH;
+    CHECK(xrStringToPath(S.instance, path, &xrPath));
+    bindings.push_back({action, xrPath});
+    return true;
+}
+
+bool createActions(AppState& S) {
+    XrActionSetCreateInfo setInfo{XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(setInfo.actionSetName, "kitvr_controls", XR_MAX_ACTION_SET_NAME_SIZE - 1);
+    std::strncpy(setInfo.localizedActionSetName, "KitVR Controls",
+                 XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE - 1);
+    CHECK(xrCreateActionSet(S.instance, &setInfo, &S.actionSet));
+    CHECK(xrStringToPath(S.instance, "/user/hand/left", &S.handPaths[0]));
+    CHECK(xrStringToPath(S.instance, "/user/hand/right", &S.handPaths[1]));
+
+    std::vector<XrActionSuggestedBinding> bindings;
+    for (size_t i = 0; i < S.handActions.size(); ++i) {
+        const char* hand = i == 0 ? "left" : "right";
+        const char* base = i == 0 ? "/user/hand/left" : "/user/hand/right";
+        auto& actions = S.handActions[i];
+        std::string actionName = std::string(hand) + "_grip_pose";
+        CHECK(createHandAction(S, i, actionName.c_str(), "Grip pose",
+                              XR_ACTION_TYPE_POSE_INPUT, actions.pose));
+        actionName = std::string(hand) + "_trigger_value";
+        CHECK(createHandAction(S, i, actionName.c_str(), "Trigger",
+                              XR_ACTION_TYPE_FLOAT_INPUT, actions.trigger));
+        actionName = std::string(hand) + "_trigger_click";
+        CHECK(createHandAction(S, i, actionName.c_str(), "Trigger click",
+                              XR_ACTION_TYPE_BOOLEAN_INPUT, actions.triggerClick));
+        actionName = std::string(hand) + "_squeeze";
+        CHECK(createHandAction(S, i, actionName.c_str(), "Grip",
+                              XR_ACTION_TYPE_FLOAT_INPUT, actions.squeeze));
+        actionName = std::string(hand) + "_thumbstick";
+        CHECK(createHandAction(S, i, actionName.c_str(), "Thumbstick",
+                              XR_ACTION_TYPE_VECTOR2F_INPUT, actions.thumbstick));
+        actionName = std::string(hand) + "_thumbstick_click";
+        CHECK(createHandAction(S, i, actionName.c_str(), "Thumbstick click",
+                              XR_ACTION_TYPE_BOOLEAN_INPUT, actions.thumbstickClick));
+        actionName = std::string(hand) + "_primary";
+        CHECK(createHandAction(S, i, actionName.c_str(), "Primary button",
+                              XR_ACTION_TYPE_BOOLEAN_INPUT, actions.primary));
+        actionName = std::string(hand) + "_secondary";
+        CHECK(createHandAction(S, i, actionName.c_str(), "Secondary button",
+                              XR_ACTION_TYPE_BOOLEAN_INPUT, actions.secondary));
+        actionName = std::string(hand) + "_menu";
+        CHECK(createHandAction(S, i, actionName.c_str(), "Menu button",
+                              XR_ACTION_TYPE_BOOLEAN_INPUT, actions.menu));
+
+        CHECK(addBinding(S, actions.pose, (std::string(base) + "/input/grip/pose").c_str(), bindings));
+        CHECK(addBinding(S, actions.trigger, (std::string(base) + "/input/trigger/value").c_str(), bindings));
+        CHECK(addBinding(S, actions.triggerClick, (std::string(base) + "/input/trigger/click").c_str(), bindings));
+        CHECK(addBinding(S, actions.squeeze, (std::string(base) + "/input/squeeze/value").c_str(), bindings));
+        CHECK(addBinding(S, actions.thumbstick, (std::string(base) + "/input/thumbstick").c_str(), bindings));
+        CHECK(addBinding(S, actions.thumbstickClick, (std::string(base) + "/input/thumbstick/click").c_str(), bindings));
+        const char* primary = i == 0 ? "/input/x/click" : "/input/a/click";
+        const char* secondary = i == 0 ? "/input/y/click" : "/input/b/click";
+        CHECK(addBinding(S, actions.primary, (std::string(base) + primary).c_str(), bindings));
+        CHECK(addBinding(S, actions.secondary, (std::string(base) + secondary).c_str(), bindings));
+        if (i == 0) {
+            CHECK(addBinding(S, actions.menu, (std::string(base) + "/input/menu/click").c_str(), bindings));
+        }
+    }
+
+    XrPath profile = XR_NULL_PATH;
+    CHECK(xrStringToPath(S.instance, "/interaction_profiles/oculus/touch_controller", &profile));
+    XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggested.interactionProfile = profile;
+    suggested.countSuggestedBindings = static_cast<uint32_t>(bindings.size());
+    suggested.suggestedBindings = bindings.data();
+    CHECK(xrSuggestInteractionProfileBindings(S.instance, &suggested));
+
+    XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attach.countActionSets = 1;
+    attach.actionSets = &S.actionSet;
+    CHECK(xrAttachSessionActionSets(S.session, &attach));
+
+    for (size_t i = 0; i < S.handActions.size(); ++i) {
+        XrActionSpaceCreateInfo spaceInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+        spaceInfo.action = S.handActions[i].pose;
+        spaceInfo.subactionPath = S.handPaths[i];
+        spaceInfo.poseInActionSpace.orientation.w = 1.0f;
+        CHECK(xrCreateActionSpace(S.session, &spaceInfo, &S.handSpaces[i]));
+    }
+    S.hasHandActions = true;
+    return true;
+}
+
+bool actionBoolean(AppState& S, XrAction action, XrPath hand) {
+    XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+    info.action = action;
+    info.subactionPath = hand;
+    XrActionStateBoolean state{XR_TYPE_ACTION_STATE_BOOLEAN};
+    return XR_SUCCEEDED(xrGetActionStateBoolean(S.session, &info, &state)) &&
+           state.isActive && state.currentState;
+}
+
+kitvr::TrackingHand readHand(AppState& S, size_t index, XrTime displayTime) {
+    kitvr::TrackingHand hand{};
+    const XrPath path = S.handPaths[index];
+    const auto& actions = S.handActions[index];
+
+    XrActionStateGetInfo getInfo{XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.action = actions.pose;
+    getInfo.subactionPath = path;
+    XrActionStatePose poseState{XR_TYPE_ACTION_STATE_POSE};
+    if (XR_SUCCEEDED(xrGetActionStatePose(S.session, &getInfo, &poseState)) && poseState.isActive) {
+        XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+        const XrSpaceLocationFlags required = XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                                              XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (XR_SUCCEEDED(xrLocateSpace(S.handSpaces[index], S.localSpace, displayTime, &location)) &&
+            (location.locationFlags & required) == required) {
+            hand.active = true;
+            hand.pose[0] = location.pose.position.x;
+            hand.pose[1] = location.pose.position.y;
+            hand.pose[2] = location.pose.position.z;
+            hand.pose[3] = location.pose.orientation.x;
+            hand.pose[4] = location.pose.orientation.y;
+            hand.pose[5] = location.pose.orientation.z;
+            hand.pose[6] = location.pose.orientation.w;
+        }
+    }
+
+    XrActionStateFloat floatState{XR_TYPE_ACTION_STATE_FLOAT};
+    getInfo.action = actions.trigger;
+    if (XR_SUCCEEDED(xrGetActionStateFloat(S.session, &getInfo, &floatState)) && floatState.isActive) {
+        hand.trigger = std::clamp(floatState.currentState, 0.0f, 1.0f);
+    }
+    getInfo.action = actions.squeeze;
+    if (XR_SUCCEEDED(xrGetActionStateFloat(S.session, &getInfo, &floatState)) && floatState.isActive) {
+        hand.grip = std::clamp(floatState.currentState, 0.0f, 1.0f);
+    }
+    XrActionStateVector2f vectorState{XR_TYPE_ACTION_STATE_VECTOR2F};
+    getInfo.action = actions.thumbstick;
+    if (XR_SUCCEEDED(xrGetActionStateVector2f(S.session, &getInfo, &vectorState)) && vectorState.isActive) {
+        hand.stickX = vectorState.currentState.x;
+        hand.stickY = vectorState.currentState.y;
+    }
+    if (actionBoolean(S, actions.triggerClick, path)) hand.buttons |= 1u << 0;
+    if (hand.grip > 0.5f) hand.buttons |= 1u << 1;
+    if (actionBoolean(S, actions.primary, path)) hand.buttons |= 1u << 2;
+    if (actionBoolean(S, actions.secondary, path)) hand.buttons |= 1u << 3;
+    if (actionBoolean(S, actions.menu, path)) hand.buttons |= 1u << 4;
+    if (actionBoolean(S, actions.thumbstickClick, path)) hand.buttons |= 1u << 5;
+    return hand;
+}
+
 // ---------------------------------------------------------------- video lifecycle
 
 bool setupVideo(AppState& S) {
@@ -413,7 +594,20 @@ void renderFrame(AppState& S) {
             head[5] = loc.pose.orientation.z;
             head[6] = loc.pose.orientation.w;
         }
-        S.net.sendTracking(kitvr::nowUs(), head);
+        kitvr::TrackingHand left;
+        kitvr::TrackingHand right;
+        if (S.hasHandActions) {
+            XrActiveActionSet activeSet{};
+            activeSet.actionSet = S.actionSet;
+            XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
+            syncInfo.countActiveActionSets = 1;
+            syncInfo.activeActionSets = &activeSet;
+            if (XR_SUCCEEDED(xrSyncActions(S.session, &syncInfo))) {
+                left = readHand(S, 0, fs.predictedDisplayTime);
+                right = readHand(S, 1, fs.predictedDisplayTime);
+            }
+        }
+        S.net.sendTracking(kitvr::nowUs(), head, left, right);
     }
 
     XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -444,9 +638,14 @@ void renderFrame(AppState& S) {
 void cleanup(AppState& S) {
     S.net.shutdown();
     teardownVideo(S);
+    for (XrSpace& space : S.handSpaces) {
+        if (space != XR_NULL_HANDLE) xrDestroySpace(space);
+        space = XR_NULL_HANDLE;
+    }
     if (S.viewSpace != XR_NULL_HANDLE) xrDestroySpace(S.viewSpace);
     if (S.localSpace != XR_NULL_HANDLE) xrDestroySpace(S.localSpace);
     if (S.session != XR_NULL_HANDLE) xrDestroySession(S.session);
+    if (S.actionSet != XR_NULL_HANDLE) xrDestroyActionSet(S.actionSet);
     if (S.instance != XR_NULL_HANDLE) xrDestroyInstance(S.instance);
     if (S.eglDisplay != EGL_NO_DISPLAY) {
         eglMakeCurrent(S.eglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -473,6 +672,7 @@ void android_main(android_app* app) {
         ANativeActivity_finish(app->activity);
         return;
     }
+    if (!createActions(S)) LOGW("controller actions unavailable; continuing with head tracking");
     S.net.startControl(host);
 
     while (!app->destroyRequested && !S.exitRequested) {

@@ -6,7 +6,11 @@ import android.content.pm.PackageInfo;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
+import android.net.nsd.NsdManager;
+import android.net.nsd.NsdServiceInfo;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
@@ -29,10 +33,13 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
+import java.net.Inet4Address;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.HashSet;
+import java.util.Set;
 
 public final class MainActivity extends Activity {
     private static final String RELEASE_URL =
@@ -44,12 +51,25 @@ public final class MainActivity extends Activity {
     private TextView updateStatus;
     private Button updateButton;
     private String updateUrl;
+    private NsdManager nsdManager;
+    private NsdManager.DiscoveryListener discoveryListener;
+    private TextView discoveryStatus;
+    private Button discoveryButton;
+    private final Set<String> discoveredHosts = new HashSet<>();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Runnable discoveryTimeout = () -> {
+        if (discoveryListener != null && discoveredHosts.isEmpty()) {
+            discoveryStatus.setText("No KitVR PC found. Enter its address manually.");
+            stopDiscovery();
+        }
+    };
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().getDecorView().setSystemUiVisibility(
                 View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+        nsdManager = (NsdManager) getSystemService(NSD_SERVICE);
         buildUi();
         checkForUpdate();
     }
@@ -94,6 +114,19 @@ public final class MainActivity extends Activity {
         hostInput.setText(getPreferences(MODE_PRIVATE).getString("host", ""));
         content.addView(hostInput, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
+
+        LinearLayout discoveryRow = new LinearLayout(this);
+        discoveryRow.setGravity(Gravity.CENTER_VERTICAL);
+        discoveryButton = button("Find PCs", panel, Color.WHITE);
+        discoveryRow.addView(discoveryButton);
+        discoveryStatus = label("or enter an address", 13, Color.rgb(190, 203, 198));
+        discoveryStatus.setPadding(dp(10), 0, 0, 0);
+        discoveryRow.addView(discoveryStatus);
+        LinearLayout.LayoutParams discoveryParams = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
+        discoveryParams.topMargin = dp(6);
+        content.addView(discoveryRow, discoveryParams);
+        discoveryButton.setOnClickListener(v -> discoverServers());
 
         Button connect = button("Connect", accent, background);
         LinearLayout.LayoutParams connectParams = new LinearLayout.LayoutParams(
@@ -141,6 +174,73 @@ public final class MainActivity extends Activity {
         Intent intent = new Intent(this, android.app.NativeActivity.class);
         intent.putExtra("host", host);
         startActivity(intent);
+    }
+
+    private void discoverServers() {
+        if (discoveryListener != null || nsdManager == null) return;
+        discoveredHosts.clear();
+        discoveryButton.setEnabled(false);
+        discoveryStatus.setText("Searching your network...");
+        discoveryListener = new NsdManager.DiscoveryListener() {
+            @Override
+            public void onDiscoveryStarted(String serviceType) {
+                runOnUiThread(() -> discoveryStatus.setText("Searching your network..."));
+            }
+
+            @Override
+            public void onServiceFound(NsdServiceInfo service) {
+                if (!"_kitvr._tcp.".equalsIgnoreCase(service.getServiceType())) return;
+                nsdManager.resolveService(service, new NsdManager.ResolveListener() {
+                    @Override
+                    public void onResolveFailed(NsdServiceInfo info, int errorCode) { }
+
+                    @Override
+                    public void onServiceResolved(NsdServiceInfo info) {
+                        if (info.getHost() == null) return;
+                        if (!(info.getHost() instanceof Inet4Address)) return;
+                        String host = info.getHost().getHostAddress();
+                        if (host == null || !discoveredHosts.add(host)) return;
+                        runOnUiThread(() -> {
+                            hostInput.setText(host);
+                            discoveryStatus.setText("Found " + info.getServiceName());
+                            stopDiscovery();
+                        });
+                    }
+                });
+            }
+
+            @Override
+            public void onServiceLost(NsdServiceInfo service) { }
+
+            @Override
+            public void onDiscoveryStopped(String serviceType) { }
+
+            @Override
+            public void onStartDiscoveryFailed(String serviceType, int errorCode) {
+                runOnUiThread(() -> {
+                    discoveryStatus.setText("Discovery unavailable. Enter the PC address manually.");
+                    stopDiscovery();
+                });
+            }
+
+            @Override
+            public void onStopDiscoveryFailed(String serviceType, int errorCode) {
+                runOnUiThread(() -> stopDiscovery());
+            }
+        };
+        nsdManager.discoverServices("_kitvr._tcp.", NsdManager.PROTOCOL_DNS_SD, discoveryListener);
+        mainHandler.postDelayed(discoveryTimeout, 5000);
+    }
+
+    private void stopDiscovery() {
+        if (discoveryListener == null) return;
+        mainHandler.removeCallbacks(discoveryTimeout);
+        try {
+            nsdManager.stopServiceDiscovery(discoveryListener);
+        } catch (IllegalArgumentException ignored) {
+        }
+        discoveryListener = null;
+        discoveryButton.setEnabled(true);
     }
 
     private void checkForUpdate() {
@@ -281,6 +381,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        stopDiscovery();
         super.onDestroy();
         worker.shutdownNow();
     }

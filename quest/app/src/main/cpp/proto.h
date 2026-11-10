@@ -111,6 +111,16 @@ struct AudioConfig {
     uint8_t micChannels = 0;  // headset to PC, 0 = none
 };
 
+struct TrackingHand {
+    uint16_t buttons = 0;
+    bool active = false;
+    float trigger = 0.0f;
+    float grip = 0.0f;
+    float stickX = 0.0f;
+    float stickY = 0.0f;
+    float pose[7] = {0, 0, 0, 0, 0, 0, 1};
+};
+
 struct Message {
     uint8_t tag = 0;
     uint16_t version = 0;  // Hello
@@ -228,8 +238,9 @@ inline bool parseAudioDown(const uint8_t* d, size_t n, const uint8_t*& payload, 
 }
 
 // ---- tracking packets ----
-// head = {px, py, pz, qx, qy, qz, qw}. Hands are sent as inactive for now.
-inline std::vector<uint8_t> encodeTracking(uint16_t seq, uint64_t tsUs, const float head[7]) {
+// poses = {px, py, pz, qx, qy, qz, qw}.
+inline std::vector<uint8_t> encodeTracking(uint16_t seq, uint64_t tsUs, const float head[7],
+                                           const TrackingHand& left, const TrackingHand& right) {
     std::vector<uint8_t> v;
     v.reserve(kTrackingLen);
     v.push_back(kPacketTracking);
@@ -237,6 +248,15 @@ inline std::vector<uint8_t> encodeTracking(uint16_t seq, uint64_t tsUs, const fl
     put16(v, seq);
     put64(v, tsUs);
     for (int i = 0; i < 7; i++) putF32(v, head[i]);
+    for (const TrackingHand* hand : {&left, &right}) {
+        put16(v, hand->buttons);
+        put16(v, hand->active ? 1 : 0);
+        putF32(v, hand->trigger);
+        putF32(v, hand->grip);
+        putF32(v, hand->stickX);
+        putF32(v, hand->stickY);
+        for (float value : hand->pose) putF32(v, value);
+    }
     v.resize(kTrackingLen, 0);
     return v;
 }

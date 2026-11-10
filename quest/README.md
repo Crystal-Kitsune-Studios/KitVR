@@ -12,8 +12,8 @@ Android app (Java launcher and C++ via the NDK) using OpenXR. One APK for Quest 
    the compositor. The swapchain is submitted as a quad layer 2 m in front of you.
 4. If the server enables audio, PC audio plays through AAudio with a small jitter buffer, and
    the microphone is captured and sent back. Microphone permission is requested at runtime.
-5. Every frame, the head pose is sent to the server over UDP. The first packet also tells the
-   server where to send video.
+5. Every frame, the head pose and active Touch-controller state are sent to the server over UDP.
+  The first packet also tells the server where to send video.
 
 ```
 app/src/main/
@@ -48,12 +48,13 @@ The application id is `com.crystalkitsune.kitvr`. Change it in `app/build.gradle
 
 1. Enable developer mode on the headset and connect adb (`adb connect <quest-ip>:5555`).
 2. Install: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
-3. Launch KitVR from the Quest library, enter your PC's IP address, and select **Connect**. The
-   address is saved for the next launch. You can also launch the immersive client directly with an
-   extra: `adb shell am start -n com.crystalkitsune.kitvr/android.app.NativeActivity --es host 192.168.1.50`
-   For direct native launches without an extra, put the address in a file:
-   `adb shell mkdir -p /sdcard/Android/data/com.crystalkitsune.kitvr/files`
-   `adb shell "echo 192.168.1.50 > /sdcard/Android/data/com.crystalkitsune.kitvr/files/host.txt"`
+3. Launch KitVR from the Quest library and select **Find PCs** to discover your server, or enter
+  its IP address manually. Select **Connect**; the address is saved for the next launch. You can
+  also launch the immersive client directly with an extra:
+  `adb shell am start -n com.crystalkitsune.kitvr/android.app.NativeActivity --es host 192.168.1.50`
+  For direct native launches without an extra, put the address in a file:
+  `adb shell mkdir -p /sdcard/Android/data/com.crystalkitsune.kitvr/files`
+  `adb shell "echo 192.168.1.50 > /sdcard/Android/data/com.crystalkitsune.kitvr/files/host.txt"`
 4. Logs: `adb logcat -s kitvr`
 
 The launcher checks the latest stable GitHub release on startup. When an update is available, choose

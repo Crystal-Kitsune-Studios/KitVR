@@ -96,6 +96,7 @@ jobs:
           New-Item -ItemType Directory -Force package | Out-Null
           Copy-Item target/release/kitvr-desktop.exe package/
           Copy-Item target/release/kitvr-server.exe package/
+          Copy-Item target/release/kitvr-updater.exe package/
           Copy-Item README.md package/
           Compress-Archive -Path package/* -DestinationPath KitVR-windows-x86_64.zip
           Compress-Archive -Path steamvr/package/kitvr -DestinationPath KitVR-steamvr-driver-windows-x86_64.zip
@@ -104,13 +105,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps AppDir/usr/share/doc/kitvr
-          cp target/release/kitvr-desktop target/release/kitvr-server AppDir/usr/bin/
+          cp target/release/kitvr-desktop target/release/kitvr-server target/release/kitvr-updater AppDir/usr/bin/
           cp README.md AppDir/usr/share/doc/kitvr/
           cp packaging/kitvr.desktop AppDir/usr/share/applications/
           rsvg-convert -w 256 -h 256 packaging/kitvr.svg -o AppDir/usr/share/icons/hicolor/256x256/apps/kitvr.png
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O linuxdeploy.AppImage
           chmod +x linuxdeploy.AppImage
-          ./linuxdeploy.AppImage --appimage-extract-and-run --appdir AppDir --desktop-file AppDir/usr/share/applications/kitvr.desktop --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/kitvr.png --executable AppDir/usr/bin/kitvr-desktop --executable AppDir/usr/bin/kitvr-server --output appimage
+          ./linuxdeploy.AppImage --appimage-extract-and-run --appdir AppDir --desktop-file AppDir/usr/share/applications/kitvr.desktop --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/kitvr.png --executable AppDir/usr/bin/kitvr-desktop --executable AppDir/usr/bin/kitvr-server --executable AppDir/usr/bin/kitvr-updater --output appimage
           mv KitVR-x86_64.AppImage KitVR-linux-x86_64.AppImage
           tar -C steamvr/package -czf KitVR-steamvr-driver-linux-x86_64.tar.gz kitvr
 

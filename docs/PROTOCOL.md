@@ -117,8 +117,9 @@ Client to server, UDP, sent every display frame (72 to 120 Hz). 136 bytes.
 Hand block: `u16 buttons`, `u16 flags` (bit0 = active), `f32 trigger`, `f32 grip`,
 `f32 stick_x`, `f32 stick_y`, then pose as above (28 bytes).
 
-The current client fills in the head pose and sends both hands as inactive. Desktop-mode
-pointer input will be a separate message type once the controller-ray mapping is decided.
+The Quest client fills in the head pose and, when Touch controllers are active, sends their grip
+poses, trigger, squeeze, thumbstick, and basic buttons in the hand blocks. SteamVR controller
+support is experimental; desktop-mode pointer input remains separate.
 
 ## Security
 

@@ -1,6 +1,6 @@
 # KitVR SteamVR driver prototype
 
-This experimental driver registers the Quest as a tracked SteamVR HMD and forwards head poses from the KitVR server over loopback UDP port 9945.
+This experimental driver registers the Quest as a SteamVR HMD with left/right controllers and forwards head, grip-pose, and basic controller input from the KitVR server over loopback UDP port 9945.
 
 ## Install
 
@@ -11,4 +11,4 @@ This experimental driver registers the Quest as a tracked SteamVR HMD and forwar
 
 Remove it with `vrpathreg removedriver <path-to-kitvr-directory>`.
 
-This is not yet a complete wireless HMD driver: it does not transmit SteamVR stereo eye images to the Quest, and it does not expose controllers. SteamVR may enumerate the device and receive tracking, but VR game frames will not yet be displayed in the headset.
+This is not yet a complete wireless HMD driver: it does not transmit SteamVR stereo eye images to the Quest. SteamVR can enumerate the HMD and controllers and receive their tracking/input, but VR game frames will not yet be displayed in the headset.

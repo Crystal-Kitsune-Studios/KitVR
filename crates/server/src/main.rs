@@ -14,6 +14,7 @@ use kitvr_core::proto::audio::{pcm_from_payload, AudioHeader, PACKET_TYPE_AUDIO_
 use kitvr_core::proto::control::{decode_message, encode_message, Codec, Message};
 use kitvr_core::proto::tracking::{Tracking, PACKET_TYPE_TRACKING};
 use kitvr_core::proto::{DecodeError, CONTROL_PORT, MEDIA_PORT, PROTOCOL_VERSION};
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 const STEAMVR_TRACKING_PORT: u16 = 9945;
 
@@ -94,6 +95,46 @@ fn host_name() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "kitvr-server".to_string())
+}
+
+fn publish_discovery(name: &str) -> Option<ServiceDaemon> {
+    let daemon = match ServiceDaemon::new() {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            eprintln!("mDNS unavailable; use the PC's IP address: {error}");
+            return None;
+        }
+    };
+    let host_label: String = name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .flat_map(char::to_lowercase)
+        .take(48)
+        .collect();
+    let host_label = if host_label.is_empty() { "kitvr" } else { &host_label };
+    let hostname = format!("kitvr-{host_label}.local.");
+    let instance = format!("KitVR on {name}");
+    let properties = [("ver", "1"), ("name", name)];
+    let service = match ServiceInfo::new(
+        "_kitvr._tcp.local.",
+        &instance,
+        &hostname,
+        "",
+        CONTROL_PORT,
+        &properties[..],
+    ) {
+        Ok(service) => service.enable_addr_auto(),
+        Err(error) => {
+            eprintln!("could not create mDNS service; use the PC's IP address: {error}");
+            return None;
+        }
+    };
+    if let Err(error) = daemon.register(service) {
+        eprintln!("could not advertise mDNS service; use the PC's IP address: {error}");
+        return None;
+    }
+    println!("discovery: _kitvr._tcp.local.");
+    Some(daemon)
 }
 
 /// Blocks until the first tracking packet reveals the client's UDP address.
@@ -262,6 +303,8 @@ fn handle_control(
 
 fn main() -> io::Result<()> {
     let (settings, audio_cfg) = parse_args();
+    let name = host_name();
+    let _discovery = publish_discovery(&name);
     println!("kitvr-server, platform: {}", platform::NAME);
     println!("native capture:  {:?}", platform::create_capture().err().map(|e| e.to_string()));
     println!("native encoder:  {:?}", platform::create_encoder().err().map(|e| e.to_string()));

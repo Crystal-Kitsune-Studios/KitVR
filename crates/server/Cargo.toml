@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 kitvr-core = { path = "../core" }
+mdns-sd = "0.21"
 
 # Windows audio (WASAPI, including loopback and virtual devices such as Voicemeeter).
 # Linux uses parec and pacat from pulseaudio-utils instead, so it needs no crate.
