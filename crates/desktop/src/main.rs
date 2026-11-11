@@ -495,17 +495,7 @@ impl eframe::App for KitVrApp {
             .show(ctx, |ui| self.header(ui));
 
         if self.console_open {
-            egui::TopBottomPanel::bottom("console")
-                .resizable(true)
-                .default_height(206.0)
-                .min_height(132.0)
-                .max_height(420.0)
-                .frame(
-                    egui::Frame::default()
-                        .fill(INK)
-                        .inner_margin(egui::Margin::symmetric(20.0, 14.0)),
-                )
-                .show(ctx, |ui| self.console_panel(ui));
+            self.show_console(ctx);
         }
 
         egui::CentralPanel::default()
@@ -523,6 +513,20 @@ impl eframe::App for KitVrApp {
 }
 
 impl KitVrApp {
+    fn show_console(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("console")
+            .resizable(true)
+            .default_height(206.0)
+            .min_height(132.0)
+            .max_height(420.0)
+            .frame(
+                egui::Frame::default()
+                    .fill(INK)
+                    .inner_margin(egui::Margin::symmetric(20.0, 14.0)),
+            )
+            .show(ctx, |ui| self.console_panel(ui));
+    }
+
     fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let (mark_rect, _) =
@@ -975,7 +979,6 @@ impl KitVrApp {
         });
         ui.add_space(8.0);
 
-        let inner_height = (ui.available_height() - 6.0).clamp(96.0, 336.0);
         egui::Frame::default()
             .fill(SUNKEN)
             .stroke(Stroke::new(1.0_f32, LINE))
@@ -983,8 +986,9 @@ impl KitVrApp {
             .inner_margin(egui::Margin::symmetric(14.0, 10.0))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.set_min_height(inner_height);
-                let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                let mut area = egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .min_scrolled_height(0.0);
                 if self.autoscroll {
                     area = area.stick_to_bottom(true);
                 }
@@ -1369,7 +1373,93 @@ fn download_update(url: &str, asset_name: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer_version, parse_version};
+    use super::*;
+
+    fn test_app() -> KitVrApp {
+        let (log_tx, log_rx) = mpsc::channel();
+        let (_, update_rx) = mpsc::channel();
+        let (update_action_tx, update_action_rx) = mpsc::channel();
+        let settings = SavedSettings::default();
+        KitVrApp {
+            host_ip: String::new(),
+            source: settings.source,
+            file_path: settings.file_path,
+            encoder: settings.encoder,
+            resolution: settings.resolution,
+            fps: settings.fps,
+            bitrate_kbps: settings.bitrate_kbps,
+            audio_enabled: settings.audio_enabled,
+            audio_device: settings.audio_device,
+            microphone_device: settings.microphone_device,
+            audio_devices: Vec::new(),
+            child: None,
+            log_tx,
+            log_rx,
+            logs: VecDeque::new(),
+            status: "Ready".to_string(),
+            tutorial_open: false,
+            tutorial_completed: true,
+            tutorial_step: 0,
+            update_rx,
+            update_offer: None,
+            update_message: String::new(),
+            update_action_tx,
+            update_action_rx,
+            restart_for_update: false,
+            update_in_progress: false,
+            console_open: true,
+            autoscroll: true,
+        }
+    }
+
+    #[test]
+    fn console_does_not_grow_across_frames() {
+        for autoscroll in [false, true] {
+            for count in [0, 100] {
+                for initial_height in [132.0, 206.0, 300.0] {
+                    let ctx = egui::Context::default();
+                    ctx.data_mut(|data| {
+                        data.insert_persisted(
+                            egui::Id::new("console"),
+                            egui::containers::panel::PanelState {
+                                rect: egui::Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    egui::vec2(900.0, initial_height),
+                                ),
+                            },
+                        );
+                    });
+                    let mut style = (*ctx.style()).clone();
+                    style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+                    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+                    style.spacing.interact_size.y = 26.0;
+                    ctx.set_style(style);
+                    let mut app = test_app();
+                    app.autoscroll = autoscroll;
+                    app.logs = (0..count).map(|i| format!("Log line {i}")).collect();
+                    for _ in 0..30 {
+                        let input = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(900.0, 620.0),
+                            )),
+                            ..Default::default()
+                        };
+                        let _ = ctx.run(input, |ctx| app.show_console(ctx));
+                    }
+                    let height =
+                        egui::containers::panel::PanelState::load(&ctx, egui::Id::new("console"))
+                            .unwrap()
+                            .size()
+                            .y;
+                    assert!(
+                        (height - initial_height).abs() <= 1.0,
+                        "console changed from {initial_height} to {height}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn parses_three_part_versions() {
