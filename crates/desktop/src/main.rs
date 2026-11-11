@@ -499,6 +499,7 @@ impl eframe::App for KitVrApp {
                 .resizable(true)
                 .default_height(206.0)
                 .min_height(132.0)
+                .max_height(420.0)
                 .frame(
                     egui::Frame::default()
                         .fill(INK)
@@ -974,7 +975,7 @@ impl KitVrApp {
         });
         ui.add_space(8.0);
 
-        let inner_height = (ui.available_height() - 6.0).max(48.0);
+        let inner_height = (ui.available_height() - 6.0).clamp(96.0, 336.0);
         egui::Frame::default()
             .fill(SUNKEN)
             .stroke(Stroke::new(1.0_f32, LINE))
