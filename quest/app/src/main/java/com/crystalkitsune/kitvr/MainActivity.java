@@ -469,11 +469,4 @@ public final class MainActivity extends Activity {
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
-
-    @Override
-    protected void onDestroy() {
-        stopDiscovery();
-        super.onDestroy();
-        worker.shutdownNow();
-    }
 }
