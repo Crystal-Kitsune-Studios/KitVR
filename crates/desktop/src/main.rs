@@ -10,6 +10,22 @@ use std::time::Duration;
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke};
 
 const LOG_LIMIT: usize = 800;
+
+const INK: Color32 = Color32::from_rgb(14, 20, 22);
+const HEADER_FILL: Color32 = Color32::from_rgb(24, 33, 36);
+const SURFACE: Color32 = Color32::from_rgb(22, 30, 33);
+const RAISED: Color32 = Color32::from_rgb(28, 38, 41);
+const SUNKEN: Color32 = Color32::from_rgb(11, 17, 19);
+const LINE: Color32 = Color32::from_rgb(42, 54, 58);
+const TEXT: Color32 = Color32::from_rgb(232, 237, 236);
+const MUTED: Color32 = Color32::from_rgb(147, 162, 163);
+const DIM: Color32 = Color32::from_rgb(130, 145, 143);
+const AMBER: Color32 = Color32::from_rgb(242, 166, 90);
+const AMBER_INK: Color32 = Color32::from_rgb(26, 18, 6);
+const AMBER_TEXT: Color32 = Color32::from_rgb(245, 192, 138);
+const GREEN: Color32 = Color32::from_rgb(98, 201, 142);
+const GREEN_TEXT: Color32 = Color32::from_rgb(168, 232, 195);
+const RED_TEXT: Color32 = Color32::from_rgb(243, 176, 169);
 const ENCODERS: &[&str] = if cfg!(windows) {
     &["hevc_amf", "hevc_nvenc", "hevc_qsv", "libx265"]
 } else {
@@ -25,8 +41,8 @@ const SETTINGS_STORAGE_KEY: &str = "kitvr.desktop.settings";
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 720.0])
-            .with_min_inner_size([820.0, 600.0]),
+            .with_inner_size([1080.0, 720.0])
+            .with_min_inner_size([900.0, 620.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -63,6 +79,8 @@ struct KitVrApp {
     update_action_rx: Receiver<UpdateAction>,
     restart_for_update: bool,
     update_in_progress: bool,
+    console_open: bool,
+    autoscroll: bool,
 }
 
 struct UpdateOffer {
@@ -115,15 +133,32 @@ impl Default for SavedSettings {
 impl KitVrApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = Color32::from_rgb(17, 25, 27);
-        visuals.window_fill = Color32::from_rgb(20, 29, 31);
-        visuals.extreme_bg_color = Color32::from_rgb(10, 16, 18);
-        visuals.widgets.inactive.bg_fill = Color32::from_rgb(35, 49, 50);
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(50, 72, 67);
-        visuals.widgets.active.bg_fill = Color32::from_rgb(83, 171, 130);
-        visuals.selection.bg_fill = Color32::from_rgb(83, 171, 130);
-        visuals.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
+        visuals.panel_fill = INK;
+        visuals.window_fill = SURFACE;
+        visuals.extreme_bg_color = SUNKEN;
+        visuals.faint_bg_color = Color32::from_rgb(18, 25, 27);
+        visuals.window_stroke = Stroke::new(1.0_f32, LINE);
+        visuals.widgets.noninteractive.bg_fill = SURFACE;
+        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
+        visuals.widgets.inactive.bg_fill = RAISED;
+        visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
+        visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+        visuals.widgets.hovered.bg_fill = Color32::from_rgb(38, 50, 53);
+        visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT);
+        visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
+        visuals.widgets.active.bg_fill = AMBER;
+        visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, AMBER_INK);
+        visuals.widgets.active.rounding = egui::Rounding::same(8.0);
+        visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(242, 166, 90, 60);
+        visuals.selection.stroke = Stroke::new(1.0_f32, AMBER_TEXT);
+        visuals.window_rounding = egui::Rounding::same(12.0);
+        visuals.menu_rounding = egui::Rounding::same(8.0);
         cc.egui_ctx.set_visuals(visuals);
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        style.spacing.button_padding = egui::vec2(12.0, 7.0);
+        style.spacing.interact_size.y = 26.0;
+        cc.egui_ctx.set_style(style);
 
         let (log_tx, log_rx) = mpsc::channel();
         let (update_tx, update_rx) = mpsc::channel();
@@ -164,6 +199,8 @@ impl KitVrApp {
             update_action_rx,
             restart_for_update: false,
             update_in_progress: false,
+            console_open: true,
+            autoscroll: true,
         };
         thread::spawn(move || {
             let _ = update_tx.send(check_latest_release());
@@ -449,92 +486,34 @@ impl eframe::App for KitVrApp {
         ctx.request_repaint_after(Duration::from_millis(150));
 
         egui::TopBottomPanel::top("header")
-            .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(26.0, 18.0)))
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new("KITVR")
-                                .size(25.0)
-                                .strong()
-                                .color(Color32::WHITE),
-                        );
-                        ui.label(
-                            RichText::new(format!("PC STREAMING CONSOLE  ·  v{}", app_version()))
-                                .size(11.0)
-                                .color(muted()),
-                        );
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if let Some(version) = self
-                            .update_offer
-                            .as_ref()
-                            .map(|offer| offer.version.clone())
-                        {
-                            let update_label = if self.update_in_progress {
-                                "Updating…"
-                            } else {
-                                "Get update"
-                            };
-                            if ui
-                                .add_enabled(
-                                    !self.update_in_progress,
-                                    egui::Button::new(update_label).small(),
-                                )
-                                .clicked()
-                            {
-                                self.start_update();
-                            }
-                            ui.label(
-                                RichText::new(format!("Update · v{version}"))
-                                    .size(12.0)
-                                    .color(Color32::from_rgb(124, 220, 174)),
-                            );
-                        } else {
-                            ui.label(
-                                RichText::new(&self.update_message)
-                                    .size(11.0)
-                                    .color(muted()),
-                            );
-                        }
-                        if ui.small_button("Tutorial").clicked() {
-                            self.tutorial_open = true;
-                            self.tutorial_step = 0;
-                        }
-                        let (dot, text) = if self.child.is_some() {
-                            (Color32::from_rgb(124, 220, 174), "SERVER RUNNING")
-                        } else {
-                            (Color32::from_rgb(220, 160, 94), "SERVER STOPPED")
-                        };
-                        ui.colored_label(dot, "●");
-                        ui.label(RichText::new(text).size(12.0).strong().color(dot));
-                    });
-                });
-            });
+            .frame(
+                egui::Frame::default()
+                    .fill(HEADER_FILL)
+                    .stroke(Stroke::new(1.0_f32, LINE))
+                    .inner_margin(egui::Margin::symmetric(20.0, 14.0)),
+            )
+            .show(ctx, |ui| self.header(ui));
 
-        egui::TopBottomPanel::bottom("footer")
-            .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(26.0, 12.0)))
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&self.status).color(muted()));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new("TCP 9943  ·  UDP 9944")
-                                .size(11.0)
-                                .color(muted()),
-                        );
-                    });
-                });
-            });
+        if self.console_open {
+            egui::TopBottomPanel::bottom("console")
+                .resizable(true)
+                .default_height(206.0)
+                .min_height(132.0)
+                .frame(
+                    egui::Frame::default()
+                        .fill(INK)
+                        .inner_margin(egui::Margin::symmetric(20.0, 14.0)),
+                )
+                .show(ctx, |ui| self.console_panel(ui));
+        }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(26.0, 14.0)))
-            .show(ctx, |ui| {
-                ui.columns(2, |columns| {
-                    self.settings_panel(&mut columns[0]);
-                    self.logs_panel(&mut columns[1]);
-                });
-            });
+            .frame(
+                egui::Frame::default()
+                    .fill(INK)
+                    .inner_margin(egui::Margin::symmetric(20.0, 18.0)),
+            )
+            .show(ctx, |ui| self.body(ui));
 
         if self.tutorial_open {
             self.tutorial_window(ctx);
@@ -543,6 +522,497 @@ impl eframe::App for KitVrApp {
 }
 
 impl KitVrApp {
+    fn header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let (mark_rect, _) =
+                ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(mark_rect, egui::Rounding::same(8.0), AMBER);
+            let center = mark_rect.center();
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(center.x, center.y - 7.5),
+                    egui::pos2(center.x + 7.5, center.y + 6.0),
+                    egui::pos2(center.x - 7.5, center.y + 6.0),
+                ],
+                AMBER_INK,
+                Stroke::NONE,
+            ));
+
+            ui.add_space(2.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(RichText::new("KitVR").size(17.0).strong().color(TEXT));
+                ui.label(
+                    RichText::new("PC to Quest streaming")
+                        .size(11.5)
+                        .color(MUTED),
+                );
+            });
+
+            ui.add_space(8.0);
+            self.status_pill(ui);
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("v{}", app_version()))
+                        .size(11.0)
+                        .color(DIM),
+                );
+                let log_label = if self.console_open { "Hide log" } else { "Log" };
+                if ui.button(log_label).clicked() {
+                    self.console_open = !self.console_open;
+                }
+                if ui.button("Tutorial").clicked() {
+                    self.tutorial_open = true;
+                    self.tutorial_step = 0;
+                }
+                if let Some(version) = self.update_offer.as_ref().map(|offer| offer.version.clone())
+                {
+                    let label = if self.update_in_progress {
+                        "Updating…"
+                    } else {
+                        "Get update"
+                    };
+                    if ui
+                        .add_enabled(!self.update_in_progress, egui::Button::new(label))
+                        .clicked()
+                    {
+                        self.start_update();
+                    }
+                    ui.label(
+                        RichText::new(format!("Update · v{version}"))
+                            .size(11.5)
+                            .color(GREEN_TEXT),
+                    );
+                } else {
+                    let message = self.update_message.clone();
+                    ui.label(RichText::new(message).size(11.0).color(DIM));
+                }
+            });
+        });
+    }
+
+    fn status_pill(&self, ui: &mut egui::Ui) {
+        let running = self.child.is_some();
+        let (fill, border, dot, text, text_color) = if running {
+            (
+                Color32::from_rgba_unmultiplied(98, 201, 142, 28),
+                Color32::from_rgba_unmultiplied(98, 201, 142, 95),
+                GREEN,
+                "Streaming",
+                GREEN_TEXT,
+            )
+        } else {
+            (
+                Color32::from_rgba_unmultiplied(147, 162, 163, 16),
+                Color32::from_rgba_unmultiplied(147, 162, 163, 60),
+                MUTED,
+                "Idle",
+                MUTED,
+            )
+        };
+        egui::Frame::default()
+            .fill(fill)
+            .stroke(Stroke::new(1.0_f32, border))
+            .rounding(egui::Rounding::same(999.0))
+            .inner_margin(egui::Margin::symmetric(11.0, 5.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 7.0;
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot_rect.center(), 3.5, dot);
+                    ui.label(RichText::new(text).size(12.0).strong().color(text_color));
+                });
+            });
+    }
+
+    fn body(&mut self, ui: &mut egui::Ui) {
+        let available = ui.available_size();
+        let right_width = (available.x * 0.36).clamp(300.0, 372.0);
+        let gap = 18.0;
+        let left_width = (available.x - right_width - gap).max(300.0);
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.allocate_ui_with_layout(
+                egui::vec2(left_width, available.y),
+                Layout::top_down(Align::Min),
+                |ui| self.stream_card(ui, available.y),
+            );
+            ui.add_space(gap);
+            ui.allocate_ui_with_layout(
+                egui::vec2(right_width, available.y),
+                Layout::top_down(Align::Min),
+                |ui| self.connect_card(ui, available.y),
+            );
+        });
+    }
+
+    fn stream_card(&mut self, ui: &mut egui::Ui, height: f32) {
+        let running = self.child.is_some();
+        egui::Frame::default()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0_f32, LINE))
+            .rounding(egui::Rounding::same(12.0))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height((height - 34.0).max(140.0));
+                ui.horizontal(|ui| {
+                    section_label(ui, "Stream setup");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        tag(ui, "hevc · low latency");
+                    });
+                });
+                ui.add_space(12.0);
+
+                ui.add_enabled_ui(!running, |ui| {
+                    let source = self.source.clone();
+                    let encoder = self.encoder.clone();
+                    ui.columns(2, |columns| {
+                        field(&mut columns[0], "VIDEO SOURCE", |ui| {
+                            egui::ComboBox::from_id_salt("source")
+                                .selected_text(RichText::new(source).size(13.5).color(TEXT))
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    for option in ["Test pattern", "Desktop", "File"] {
+                                        ui.selectable_value(
+                                            &mut self.source,
+                                            option.to_string(),
+                                            option,
+                                        );
+                                    }
+                                });
+                        });
+                        field(&mut columns[1], "ENCODER", |ui| {
+                            egui::ComboBox::from_id_salt("encoder")
+                                .selected_text(RichText::new(encoder).size(13.5).color(TEXT))
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    for option in ENCODERS {
+                                        ui.selectable_value(
+                                            &mut self.encoder,
+                                            (*option).to_string(),
+                                            *option,
+                                        );
+                                    }
+                                });
+                        });
+                    });
+
+                    if self.source == "File" {
+                        ui.add_space(8.0);
+                        field(ui, "MEDIA FILE", |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.file_path)
+                                    .hint_text("Path to a video file")
+                                    .desired_width(ui.available_width())
+                                    .frame(false),
+                            );
+                        });
+                    }
+
+                    ui.add_space(8.0);
+                    let resolution = self.resolution.clone();
+                    ui.columns(2, |columns| {
+                        field(&mut columns[0], "RESOLUTION", |ui| {
+                            egui::ComboBox::from_id_salt("resolution")
+                                .selected_text(RichText::new(resolution).size(13.5).color(TEXT))
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    for option in RESOLUTIONS {
+                                        ui.selectable_value(
+                                            &mut self.resolution,
+                                            (*option).to_string(),
+                                            *option,
+                                        );
+                                    }
+                                });
+                        });
+                        field(&mut columns[1], "FRAME RATE", |ui| {
+                            egui::ComboBox::from_id_salt("fps")
+                                .selected_text(
+                                    RichText::new(format!("{} fps", self.fps))
+                                        .size(13.5)
+                                        .color(TEXT),
+                                )
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    for fps in FRAME_RATES {
+                                        ui.selectable_value(
+                                            &mut self.fps,
+                                            *fps,
+                                            format!("{fps} fps"),
+                                        );
+                                    }
+                                });
+                        });
+                    });
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        section_label(ui, "Bitrate");
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{:.1} Mbps",
+                                    self.bitrate_kbps as f32 / 1000.0
+                                ))
+                                .size(13.0)
+                                .strong()
+                                .color(TEXT),
+                            );
+                        });
+                    });
+                    ui.spacing_mut().slider_width = (ui.available_width() - 64.0).max(120.0);
+                    ui.add(
+                        egui::Slider::new(&mut self.bitrate_kbps, 5_000..=120_000)
+                            .step_by(5_000.0)
+                            .suffix(" kbps"),
+                    );
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        section_label(ui, "Audio");
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Rescan").clicked() {
+                                self.refresh_audio_devices();
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    let mut audio_enabled = self.audio_enabled;
+                    option_row(
+                        ui,
+                        "Send PC audio to the headset",
+                        "Devices are matched by name, so virtual cables work too",
+                        &mut audio_enabled,
+                    );
+                    self.audio_enabled = audio_enabled;
+
+                    if self.audio_enabled {
+                        ui.add_space(8.0);
+                        let selected = self.audio_device.clone();
+                        let devices = self.audio_devices.clone();
+                        let selected_text = if selected == "default" {
+                            "System default output".to_string()
+                        } else {
+                            selected
+                        };
+                        field(ui, "AUDIO DEVICE", |ui| {
+                            egui::ComboBox::from_id_salt("audio")
+                                .selected_text(RichText::new(selected_text).size(13.5).color(TEXT))
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.audio_device,
+                                        "default".to_string(),
+                                        "System default output",
+                                    );
+                                    for device in &devices {
+                                        ui.selectable_value(
+                                            &mut self.audio_device,
+                                            device.clone(),
+                                            device,
+                                        );
+                                    }
+                                });
+                        });
+                    }
+
+                    ui.add_space(8.0);
+                    let mut microphone = self.microphone_device.clone();
+                    field(ui, "PC MICROPHONE DESTINATION", |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut microphone)
+                                .hint_text("Leave empty to keep the microphone off")
+                                .desired_width(ui.available_width())
+                                .frame(false),
+                        );
+                    });
+                    self.microphone_device = microphone;
+                });
+
+                ui.add_space(14.0);
+                let (label, fill, border, text_color) = if running {
+                    (
+                        "Stop streaming",
+                        Color32::from_rgba_unmultiplied(228, 115, 106, 26),
+                        Color32::from_rgba_unmultiplied(228, 115, 106, 120),
+                        RED_TEXT,
+                    )
+                } else {
+                    ("Start streaming", AMBER, AMBER, AMBER_INK)
+                };
+                let button = egui::Button::new(RichText::new(label).size(15.0).strong().color(text_color))
+                    .fill(fill)
+                    .stroke(Stroke::new(1.0_f32, border))
+                    .min_size(egui::vec2(ui.available_width(), 46.0));
+                if ui.add(button).clicked() {
+                    if running {
+                        self.stop_server();
+                    } else {
+                        self.start_server();
+                    }
+                }
+
+                ui.add_space(10.0);
+                let note = if running {
+                    "Stop the stream before changing the source, encoder or resolution."
+                } else {
+                    "Test pattern needs no capture, so it is the quickest way to prove the link works."
+                };
+                ui.label(RichText::new(note).size(11.5).color(DIM));
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "Desktop capture uses gdigrab on Windows and x11grab on Linux (X11 or XWayland only). Wayland native capture is not implemented yet.",
+                    )
+                    .size(11.5)
+                    .color(DIM),
+                );
+            });
+    }
+
+    fn connect_card(&mut self, ui: &mut egui::Ui, height: f32) {
+        egui::Frame::default()
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0_f32, LINE))
+            .rounding(egui::Rounding::same(12.0))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height((height - 34.0).max(140.0));
+                ui.horizontal(|ui| {
+                    section_label(ui, "Connect from Quest");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Refresh").clicked() {
+                            self.host_ip = local_ip();
+                        }
+                    });
+                });
+                ui.add_space(10.0);
+
+                let address = self.host_ip.clone();
+                egui::Frame::default()
+                    .fill(SUNKEN)
+                    .stroke(Stroke::new(1.0_f32, LINE))
+                    .rounding(egui::Rounding::same(10.0))
+                    .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&address).monospace().size(21.0).color(TEXT));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("Copy").clicked() {
+                                    ui.output_mut(|output| output.copied_text = address.clone());
+                                }
+                            });
+                        });
+                    });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    tag(ui, "TCP 9943 control");
+                    tag(ui, "UDP 9944 video");
+                });
+
+                ui.add_space(12.0);
+                step_row(ui, 1, "Open KitVR in the headset and pick this PC.");
+                step_row(ui, 2, "Press Connect while the server is running here.");
+                step_row(ui, 3, "The stream opens as a flat panel 2 m ahead.");
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "If this PC is missing in the headset list, check that both devices are on the same network and that TCP 9943 plus UDP 9944 are allowed through the firewall.",
+                    )
+                    .size(11.5)
+                    .color(DIM),
+                );
+
+                ui.add_space(12.0);
+                section_label(ui, "Limits in this build");
+                ui.add_space(6.0);
+                for line in [
+                    "About one extra frame of latency",
+                    "Fixed GOP, keyframe requests are not honored",
+                    "No input injection yet",
+                    "Audio is raw PCM, not compressed",
+                ] {
+                    ui.label(RichText::new(format!("- {line}")).size(11.5).color(MUTED));
+                }
+            });
+    }
+
+    fn console_panel(&mut self, ui: &mut egui::Ui) {
+        let status = self.status.clone();
+        ui.horizontal(|ui| {
+            section_label(ui, "Server output");
+            ui.add_space(4.0);
+            ui.label(RichText::new(status).size(11.5).color(MUTED));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Clear").clicked() {
+                    self.logs.clear();
+                }
+                if ui.button("Copy").clicked() {
+                    let text = self.logs.iter().cloned().collect::<Vec<_>>().join("\n");
+                    ui.output_mut(|output| output.copied_text = text);
+                }
+                let label = if self.autoscroll {
+                    "Autoscroll on"
+                } else {
+                    "Autoscroll off"
+                };
+                if ui.button(label).clicked() {
+                    self.autoscroll = !self.autoscroll;
+                }
+            });
+        });
+        ui.add_space(8.0);
+
+        let inner_height = (ui.available_height() - 6.0).max(48.0);
+        egui::Frame::default()
+            .fill(SUNKEN)
+            .stroke(Stroke::new(1.0_f32, LINE))
+            .rounding(egui::Rounding::same(12.0))
+            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(inner_height);
+                let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                if self.autoscroll {
+                    area = area.stick_to_bottom(true);
+                }
+                area.show(ui, |ui| {
+                    if self.logs.is_empty() {
+                        ui.label(
+                            RichText::new("Server messages will appear here.")
+                                .size(11.5)
+                                .color(DIM),
+                        );
+                    }
+                    for line in &self.logs {
+                        let lower = line.to_ascii_lowercase();
+                        let color = if lower.contains("error")
+                            || lower.contains("failed")
+                            || lower.contains("could not")
+                        {
+                            RED_TEXT
+                        } else if lower.contains("warn") {
+                            AMBER_TEXT
+                        } else {
+                            Color32::from_rgb(147, 166, 165)
+                        };
+                        ui.label(RichText::new(line).monospace().size(11.5).color(color));
+                    }
+                });
+            });
+    }
+
     fn tutorial_window(&mut self, ctx: &egui::Context) {
         let mut open = self.tutorial_open;
         egui::Window::new("Welcome to KitVR")
@@ -557,7 +1027,7 @@ impl KitVrApp {
                     RichText::new(format!("Getting started  ·  {}/3", self.tutorial_step + 1))
                         .size(11.0)
                         .strong()
-                        .color(Color32::from_rgb(124, 220, 174)),
+                        .color(AMBER_TEXT),
                 );
                 ui.add_space(10.0);
                 match self.tutorial_step {
@@ -578,7 +1048,10 @@ impl KitVrApp {
                     _ => {
                         ui.heading("Connect the Quest");
                         ui.add_space(8.0);
-                        ui.label(format!("On the Quest, open KitVR and enter this PC address: {}", self.host_ip));
+                        ui.label(format!(
+                            "On the Quest, open KitVR and enter this PC address: {}",
+                            self.host_ip
+                        ));
                         ui.add_space(8.0);
                         ui.label("Start the server here, then press Connect in the headset app.");
                     }
@@ -615,202 +1088,116 @@ impl KitVrApp {
             self.tutorial_completed = true;
         }
     }
-
-    fn settings_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading(RichText::new("Stream setup").size(19.0));
-        ui.add_space(10.0);
-        egui::Frame::group(ui.style())
-            .fill(Color32::from_rgb(22, 33, 35))
-            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(44, 61, 60)))
-            .inner_margin(16.0)
-            .show(ui, |ui| {
-                let running = self.child.is_some();
-                ui.add_enabled_ui(!running, |ui| {
-                    field_label(ui, "VIDEO SOURCE");
-                    egui::ComboBox::from_id_salt("source")
-                        .selected_text(&self.source)
-                        .width(ui.available_width())
-                        .show_ui(ui, |ui| {
-                            for source in ["Test pattern", "Desktop", "File"] {
-                                ui.selectable_value(&mut self.source, source.to_string(), source);
-                            }
-                        });
-                    if self.source == "File" {
-                        ui.add_space(6.0);
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.file_path)
-                                .hint_text("Path to video file")
-                                .desired_width(ui.available_width()),
-                        );
-                    }
-
-                    ui.add_space(14.0);
-                    field_label(ui, "VIDEO ENCODER");
-                    egui::ComboBox::from_id_salt("encoder")
-                        .selected_text(&self.encoder)
-                        .width(ui.available_width())
-                        .show_ui(ui, |ui| {
-                            for encoder in ENCODERS {
-                                ui.selectable_value(
-                                    &mut self.encoder,
-                                    (*encoder).to_string(),
-                                    *encoder,
-                                );
-                            }
-                        });
-
-                    ui.add_space(14.0);
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            field_label(ui, "RESOLUTION");
-                            egui::ComboBox::from_id_salt("resolution")
-                                .selected_text(&self.resolution)
-                                .width(145.0)
-                                .show_ui(ui, |ui| {
-                                    for resolution in RESOLUTIONS {
-                                        ui.selectable_value(
-                                            &mut self.resolution,
-                                            (*resolution).to_string(),
-                                            *resolution,
-                                        );
-                                    }
-                                });
-                        });
-                        ui.vertical(|ui| {
-                            field_label(ui, "FPS");
-                            egui::ComboBox::from_id_salt("fps")
-                                .selected_text(self.fps.to_string())
-                                .width(80.0)
-                                .show_ui(ui, |ui| {
-                                    for fps in FRAME_RATES {
-                                        ui.selectable_value(&mut self.fps, *fps, fps.to_string());
-                                    }
-                                });
-                        });
-                    });
-
-                    ui.add_space(14.0);
-                    field_label(ui, "BITRATE  ·  KBPS");
-                    ui.add(
-                        egui::Slider::new(&mut self.bitrate_kbps, 5_000..=100_000)
-                            .step_by(5_000.0)
-                            .suffix(" kbps"),
-                    );
-
-                    ui.add_space(14.0);
-                    field_label(ui, "AUDIO");
-                    ui.checkbox(&mut self.audio_enabled, "Send PC audio to headset");
-                    if self.audio_enabled {
-                        egui::ComboBox::from_id_salt("audio")
-                            .selected_text(&self.audio_device)
-                            .width(ui.available_width())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.audio_device,
-                                    "default".to_string(),
-                                    "System default output",
-                                );
-                                for device in &self.audio_devices {
-                                    ui.selectable_value(
-                                        &mut self.audio_device,
-                                        device.clone(),
-                                        device,
-                                    );
-                                }
-                            });
-                    }
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.microphone_device)
-                                .hint_text("Optional PC mic destination")
-                                .desired_width(ui.available_width() - 92.0),
-                        );
-                        if ui.small_button("List audio").clicked() {
-                            self.refresh_audio_devices();
-                        }
-                    });
-                });
-
-                ui.add_space(16.0);
-                if running {
-                    if ui
-                        .button(RichText::new("Stop streaming").strong())
-                        .clicked()
-                    {
-                        self.stop_server();
-                    }
-                } else if ui
-                    .button(RichText::new("Start streaming").strong())
-                    .clicked()
-                {
-                    self.start_server();
-                }
-            });
-
-        ui.add_space(16.0);
-        egui::Frame::group(ui.style())
-            .fill(Color32::from_rgb(22, 33, 35))
-            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(44, 61, 60)))
-            .inner_margin(16.0)
-            .show(ui, |ui| {
-                field_label(ui, "QUEST CONNECTION ADDRESS");
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(&self.host_ip)
-                            .size(20.0)
-                            .strong()
-                            .color(Color32::WHITE),
-                    );
-                    if ui.small_button("Copy").clicked() {
-                        ui.output_mut(|output| output.copied_text = self.host_ip.clone());
-                    }
-                    if ui.small_button("Refresh").clicked() {
-                        self.host_ip = local_ip();
-                    }
-                });
-                ui.label(
-                    RichText::new("Enter this address in KitVR on your headset.").color(muted()),
-                );
-            });
-    }
-
-    fn logs_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new("Server output").size(19.0));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("Clear").clicked() {
-                    self.logs.clear();
-                }
-            });
-        });
-        ui.add_space(10.0);
-        egui::Frame::group(ui.style())
-            .fill(Color32::from_rgb(10, 16, 18))
-            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(44, 61, 60)))
-            .inner_margin(12.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        if self.logs.is_empty() {
-                            ui.label(
-                                RichText::new("Server messages will appear here.").color(muted()),
-                            );
-                        }
-                        for line in &self.logs {
-                            ui.label(
-                                RichText::new(line)
-                                    .monospace()
-                                    .size(12.0)
-                                    .color(Color32::from_rgb(183, 199, 191)),
-                            );
-                        }
-                    });
-            });
-    }
 }
 
+fn section_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .size(10.5)
+            .strong()
+            .color(MUTED),
+    );
+}
+
+fn tag(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::default()
+        .fill(RAISED)
+        .stroke(Stroke::new(1.0_f32, LINE))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).monospace().size(10.5).color(MUTED));
+        });
+}
+
+fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::default()
+        .fill(RAISED)
+        .stroke(Stroke::new(1.0_f32, LINE))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(label).size(9.5).strong().color(DIM));
+            add(ui);
+        });
+}
+
+fn option_row(ui: &mut egui::Ui, title: &str, detail: &str, value: &mut bool) {
+    egui::Frame::default()
+        .fill(RAISED)
+        .stroke(Stroke::new(1.0_f32, LINE))
+        .rounding(egui::Rounding::same(10.0))
+        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new(title).size(13.0).color(TEXT));
+                    ui.label(RichText::new(detail).size(11.0).color(MUTED));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    switch(ui, value);
+                });
+            });
+        });
+}
+
+fn switch(ui: &mut egui::Ui, value: &mut bool) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(40.0, 22.0), egui::Sense::click());
+    if response.clicked() {
+        *value = !*value;
+    }
+    let track = if *value {
+        AMBER
+    } else {
+        Color32::from_rgb(51, 64, 63)
+    };
+    ui.painter().rect_filled(rect, egui::Rounding::same(11.0), track);
+    let knob_x = if *value {
+        rect.right() - 11.0
+    } else {
+        rect.left() + 11.0
+    };
+    let knob = if *value {
+        AMBER_INK
+    } else {
+        Color32::from_rgb(138, 153, 155)
+    };
+    ui.painter()
+        .circle_filled(egui::pos2(knob_x, rect.center().y), 8.0, knob);
+}
+
+fn step_row(ui: &mut egui::Ui, number: u8, text: &str) {
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(19.0, 19.0), egui::Sense::hover());
+        let center = rect.center();
+        ui.painter()
+            .circle_filled(center, 9.5, Color32::from_rgb(46, 37, 26));
+        ui.painter().circle_stroke(
+            center,
+            9.5,
+            Stroke::new(1.0_f32, Color32::from_rgb(122, 88, 52)),
+        );
+        ui.painter().text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            number.to_string(),
+            egui::FontId::proportional(11.0),
+            AMBER_TEXT,
+        );
+        ui.add(
+            egui::Label::new(
+                RichText::new(text)
+                    .size(12.5)
+                    .color(Color32::from_rgb(203, 214, 212)),
+            )
+            .wrap(),
+        );
+        ui.add_space(2.0);
+    });
+}
 impl Drop for KitVrApp {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -873,19 +1260,6 @@ fn parse_resolution(value: &str) -> (u32, u32) {
         (Ok(width), Ok(height)) => (width, height),
         _ => (1920, 1080),
     }
-}
-
-fn field_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .size(10.0)
-            .strong()
-            .color(Color32::from_rgb(139, 165, 155)),
-    );
-}
-
-fn muted() -> Color32 {
-    Color32::from_rgb(153, 170, 165)
 }
 
 fn app_version() -> String {

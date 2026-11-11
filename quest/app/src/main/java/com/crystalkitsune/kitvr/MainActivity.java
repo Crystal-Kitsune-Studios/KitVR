@@ -137,6 +137,13 @@ public final class MainActivity extends Activity {
         checkForUpdate();
     }
 
+    @Override
+    protected void onDestroy() {
+        stopDiscovery();
+        worker.shutdownNow();
+        super.onDestroy();
+    }
+
     private void buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
