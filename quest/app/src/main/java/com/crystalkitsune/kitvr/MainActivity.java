@@ -901,11 +901,4 @@ public final class MainActivity extends Activity {
             canvas.drawCircle(left + knob / 2f, h / 2f, knob / 2f, paint);
         }
     }
-
-    @Override
-    protected void onDestroy() {
-        stopDiscovery();
-        super.onDestroy();
-        worker.shutdownNow();
-    }
 }
