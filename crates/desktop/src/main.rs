@@ -518,6 +518,7 @@ impl KitVrApp {
             .resizable(true)
             .default_height(206.0)
             .min_height(132.0)
+            .max_height(420.0)
             .frame(
                 egui::Frame::default()
                     .fill(INK)
