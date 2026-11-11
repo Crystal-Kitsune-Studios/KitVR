@@ -11,4 +11,4 @@ This experimental driver registers the Quest as a SteamVR HMD with left/right co
 
 Remove it with `vrpathreg removedriver <path-to-kitvr-directory>`.
 
-This is not yet a complete wireless HMD driver: it does not transmit SteamVR stereo eye images to the Quest. SteamVR can enumerate the HMD and controllers and receive their tracking/input, but VR game frames will not yet be displayed in the headset. Lower-body trackers require the runtime's Meta full-body extension; older runtimes provide torso joints only or no body tracking.
+This is not yet a complete wireless HMD driver: it does not capture the SteamVR virtual-display frame for transmission to the Quest. The Quest client can present a side-by-side stereo video file through the normal stream path with the server's `--stereo-sbs` option, but live SteamVR game frames are not yet displayed in the headset. Lower-body trackers require the runtime's Meta full-body extension; older runtimes provide torso joints only or no body tracking.

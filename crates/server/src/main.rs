@@ -26,7 +26,8 @@ kitvr-server [options]
 Video:
   --source testpattern|desktop|file:<path>   what to stream (default testpattern)
   --encoder libx265|hevc_nvenc|hevc_amf|hevc_qsv|hevc_vaapi   (default libx265)
-  --width N --height N --fps N               (default 1920 1080 60)
+    --width N --height N --fps N               encoded frame size and rate (default 1920 1080 60)
+    --stereo-sbs                                file input is side-by-side; width is both eyes
   --bitrate-kbps N                           (default 40000)
   --gop N                                    frames between keyframes (default 60)
 
@@ -68,6 +69,7 @@ fn parse_args() -> (bridge::Settings, audio::AudioSettings) {
             "--fps" => s.fps = next().parse().unwrap_or(s.fps),
             "--bitrate-kbps" => s.bitrate_kbps = next().parse().unwrap_or(s.bitrate_kbps),
             "--gop" => s.gop = next().parse().unwrap_or(s.gop),
+            "--stereo-sbs" => s.stereo_sbs = true,
             "--audio-device" => a.capture = Some(next()),
             "--mic-device" => a.mic_output = Some(next()),
             "--no-audio" => {
@@ -89,6 +91,14 @@ fn parse_args() -> (bridge::Settings, audio::AudioSettings) {
                 std::process::exit(2);
             }
         }
+    }
+    if s.stereo_sbs && !matches!(&s.source, bridge::Source::File(_)) {
+        eprintln!("--stereo-sbs requires --source file:<path> with side-by-side video\n{USAGE}");
+        std::process::exit(2);
+    }
+    if s.stereo_sbs && (s.width < 2 || s.width % 2 != 0 || s.width > u16::MAX as u32) {
+        eprintln!("--stereo-sbs requires an even total --width between 2 and 65535\n{USAGE}");
+        std::process::exit(2);
     }
     (s, a)
 }
@@ -262,6 +272,7 @@ fn handle_control(
                                 height: settings.height as u16,
                                 fps: settings.fps as u16,
                                 bitrate_kbps: settings.bitrate_kbps,
+                                stereo_sbs: settings.stereo_sbs,
                             }));
                             if audio_cfg.capture.is_some() || audio_cfg.mic_output.is_some() {
                                 out.extend_from_slice(&encode_message(&Message::AudioConfig {

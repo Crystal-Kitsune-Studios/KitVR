@@ -105,6 +105,7 @@ struct StreamConfig {
     uint16_t height = 0;
     uint16_t fps = 0;
     uint32_t bitrateKbps = 0;
+    bool stereoSbs = false;
 };
 
 struct AudioConfig {
@@ -168,6 +169,7 @@ public:
                 m.cfg.height = get16(p + 3);
                 m.cfg.fps = get16(p + 5);
                 m.cfg.bitrateKbps = get32(p + 7);
+                m.cfg.stereoSbs = n >= 12 && p[11] != 0;
             }
         } else if (m.tag == kAudioConfig) {
             if (n < 8) {

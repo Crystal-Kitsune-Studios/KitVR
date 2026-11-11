@@ -55,7 +55,7 @@ The application id is `com.crystalkitsune.kitvr`. Change it in `app/build.gradle
 3. Launch KitVR from the Quest library and select **Find PCs** to discover your server, or enter
   its IP address manually. Select **Connect**; the address is saved for the next launch. You can
   also launch the immersive client directly with an extra:
-  `adb shell am start -n com.crystalkitsune.kitvr/android.app.NativeActivity --es host 192.168.1.50`
+  `adb shell am start -n com.crystalkitsune.kitvr/.KitVrActivity --es host 192.168.1.50`
   For direct native launches without an extra, put the address in a file:
   `adb shell mkdir -p /sdcard/Android/data/com.crystalkitsune.kitvr/files`
   `adb shell "echo 192.168.1.50 > /sdcard/Android/data/com.crystalkitsune.kitvr/files/host.txt"`

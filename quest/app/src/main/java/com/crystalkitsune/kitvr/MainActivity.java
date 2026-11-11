@@ -9,6 +9,8 @@ import android.graphics.Typeface;
 import android.net.Uri;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
+import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -35,10 +37,13 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
+import java.net.InetAddress;
 import java.net.Inet4Address;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.HashSet;
@@ -59,6 +64,7 @@ public final class MainActivity extends Activity {
     private String updateUrl;
     private NsdManager nsdManager;
     private NsdManager.DiscoveryListener discoveryListener;
+    private WifiManager.MulticastLock discoveryMulticastLock;
     private TextView discoveryStatus;
     private Button discoveryButton;
     private String pendingHost;
@@ -79,6 +85,13 @@ public final class MainActivity extends Activity {
         nsdManager = (NsdManager) getSystemService(NSD_SERVICE);
         buildUi();
         checkForUpdate();
+    }
+
+    @Override
+    protected void onDestroy() {
+        stopDiscovery();
+        worker.shutdownNow();
+        super.onDestroy();
     }
 
     private void buildUi() {
@@ -204,7 +217,7 @@ public final class MainActivity extends Activity {
 
     private void launchNative(String host) {
         status.setText("Starting KitVR. Make sure the KitVR server is running on " + host + ".");
-        Intent intent = new Intent(this, android.app.NativeActivity.class);
+        Intent intent = new Intent(this, KitVrActivity.class);
         intent.putExtra("host", host);
         intent.putExtra("waiting_music", getPreferences(MODE_PRIVATE).getBoolean("waiting_music", true));
         startActivity(intent);
@@ -223,6 +236,13 @@ public final class MainActivity extends Activity {
     private void discoverServers() {
         if (discoveryListener != null || nsdManager == null) return;
         discoveredHosts.clear();
+        WifiManager wifiManager = (WifiManager) getApplicationContext()
+                .getSystemService(WIFI_SERVICE);
+        if (wifiManager != null) {
+            discoveryMulticastLock = wifiManager.createMulticastLock("KitVRDiscovery");
+            discoveryMulticastLock.setReferenceCounted(false);
+            discoveryMulticastLock.acquire();
+        }
         discoveryButton.setEnabled(false);
         discoveryStatus.setText("Searching your network...");
         discoveryListener = new NsdManager.DiscoveryListener() {
@@ -233,16 +253,16 @@ public final class MainActivity extends Activity {
 
             @Override
             public void onServiceFound(NsdServiceInfo service) {
-                if (!"_kitvr._tcp.".equalsIgnoreCase(service.getServiceType())) return;
+                if (!isKitVrServiceType(service.getServiceType())) return;
                 nsdManager.resolveService(service, new NsdManager.ResolveListener() {
                     @Override
                     public void onResolveFailed(NsdServiceInfo info, int errorCode) { }
 
                     @Override
                     public void onServiceResolved(NsdServiceInfo info) {
-                        if (info.getHost() == null) return;
-                        if (!(info.getHost() instanceof Inet4Address)) return;
-                        String host = info.getHost().getHostAddress();
+                        Inet4Address address = findIpv4Address(info);
+                        if (address == null) return;
+                        String host = address.getHostAddress();
                         if (host == null || !discoveredHosts.add(host)) return;
                         runOnUiThread(() -> {
                             hostInput.setText(host);
@@ -276,15 +296,42 @@ public final class MainActivity extends Activity {
         mainHandler.postDelayed(discoveryTimeout, 5000);
     }
 
-    private void stopDiscovery() {
-        if (discoveryListener == null) return;
-        mainHandler.removeCallbacks(discoveryTimeout);
-        try {
-            nsdManager.stopServiceDiscovery(discoveryListener);
-        } catch (IllegalArgumentException ignored) {
+    private static boolean isKitVrServiceType(String serviceType) {
+        if (serviceType == null) return false;
+        String normalized = serviceType.toLowerCase(Locale.ROOT);
+        while (normalized.endsWith(".")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
         }
-        discoveryListener = null;
-        discoveryButton.setEnabled(true);
+        if (normalized.endsWith(".local")) {
+            normalized = normalized.substring(0, normalized.length() - 6);
+        }
+        return normalized.equals("_kitvr._tcp");
+    }
+
+    private static Inet4Address findIpv4Address(NsdServiceInfo service) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            for (InetAddress address : service.getHostAddresses()) {
+                if (address instanceof Inet4Address) return (Inet4Address) address;
+            }
+        }
+        InetAddress address = service.getHost();
+        return address instanceof Inet4Address ? (Inet4Address) address : null;
+    }
+
+    private void stopDiscovery() {
+        mainHandler.removeCallbacks(discoveryTimeout);
+        if (discoveryListener != null) {
+            try {
+                nsdManager.stopServiceDiscovery(discoveryListener);
+            } catch (IllegalArgumentException ignored) {
+            }
+            discoveryListener = null;
+            discoveryButton.setEnabled(true);
+        }
+        if (discoveryMulticastLock != null) {
+            if (discoveryMulticastLock.isHeld()) discoveryMulticastLock.release();
+            discoveryMulticastLock = null;
+        }
     }
 
     private void checkForUpdate() {

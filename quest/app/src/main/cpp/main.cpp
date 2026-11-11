@@ -792,7 +792,8 @@ void maintainVideo(AppState& S) {
     kitvr::StreamConfig c;
     if (S.net.takeConfig(c)) {
         bool changed = !S.haveCfg || c.codec != S.cfg.codec || c.width != S.cfg.width ||
-                       c.height != S.cfg.height || c.fps != S.cfg.fps;
+                       c.height != S.cfg.height || c.fps != S.cfg.fps ||
+                       c.stereoSbs != S.cfg.stereoSbs;
         if (changed) {
             if (S.videoSwapchain != XR_NULL_HANDLE) teardownVideo(S);
             S.cfg = c;
@@ -866,21 +867,40 @@ void renderFrame(AppState& S) {
         }
     }
 
-    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    const XrCompositionLayerBaseHeader* layers[1] = {nullptr};
+    XrCompositionLayerQuad leftQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    XrCompositionLayerQuad rightQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    const XrCompositionLayerBaseHeader* layers[2] = {nullptr, nullptr};
     uint32_t layerCount = 0;
     if (fs.shouldRender && S.videoSwapchain != XR_NULL_HANDLE && S.cfg.height > 0) {
-        quad.layerFlags = 0;
-        quad.space = S.localSpace;
-        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-        quad.subImage.swapchain = S.videoSwapchain;
-        quad.subImage.imageRect.offset = {0, 0};
-        quad.subImage.imageRect.extent = {static_cast<int32_t>(S.cfg.width), static_cast<int32_t>(S.cfg.height)};
-        quad.subImage.imageArrayIndex = 0;
-        quad.pose.orientation.w = 1.0f;
-        quad.pose.position = {0.0f, 0.0f, -kQuadDistanceM};
-        quad.size = {kQuadHeightM * static_cast<float>(S.cfg.width) / static_cast<float>(S.cfg.height), kQuadHeightM};
-        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+        const uint32_t eyeWidth = S.cfg.stereoSbs && S.cfg.width >= 2 && S.cfg.width % 2 == 0
+                                      ? S.cfg.width / 2
+                                      : S.cfg.width;
+        auto configureQuad = [&](XrCompositionLayerQuad& quad, XrEyeVisibility eye,
+                                 uint32_t imageX) {
+            quad.layerFlags = 0;
+            quad.space = S.localSpace;
+            quad.eyeVisibility = eye;
+            quad.subImage.swapchain = S.videoSwapchain;
+            quad.subImage.imageRect.offset = {static_cast<int32_t>(imageX), 0};
+            quad.subImage.imageRect.extent = {static_cast<int32_t>(eyeWidth),
+                                               static_cast<int32_t>(S.cfg.height)};
+            quad.subImage.imageArrayIndex = 0;
+            quad.pose.orientation.w = 1.0f;
+            quad.pose.position = {0.0f, 0.0f, -kQuadDistanceM};
+            quad.size = {kQuadHeightM * static_cast<float>(eyeWidth) /
+                             static_cast<float>(S.cfg.height),
+                         kQuadHeightM};
+        };
+        const bool stereoSbs = S.cfg.stereoSbs && S.cfg.width >= 2 && S.cfg.width % 2 == 0;
+        if (stereoSbs) {
+            configureQuad(leftQuad, XR_EYE_VISIBILITY_LEFT, 0);
+            configureQuad(rightQuad, XR_EYE_VISIBILITY_RIGHT, eyeWidth);
+            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&leftQuad);
+            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&rightQuad);
+        } else {
+            configureQuad(leftQuad, XR_EYE_VISIBILITY_BOTH, 0);
+            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&leftQuad);
+        }
     }
 
     XrFrameEndInfo ei{XR_TYPE_FRAME_END_INFO};

@@ -43,7 +43,7 @@ Maximum length is 65536. A decoder that sees `Truncated` should read more bytes 
 | Tag | Name | Body |
 |---|---|---|
 | 1 | Hello | `u16 version`, `u8 name_len`, `name` (UTF-8) |
-| 2 | StreamConfig | `u8 codec` (1 H.264, 2 HEVC, 3 AV1), `u16 width`, `u16 height`, `u16 fps`, `u32 bitrate_kbps` |
+| 2 | StreamConfig | `u8 codec` (1 H.264, 2 HEVC, 3 AV1), `u16 width`, `u16 height`, `u16 fps`, `u32 bitrate_kbps`, optional `u8 layout` |
 | 3 | KeyframeRequest | `u32 last_good_frame` |
 | 4 | BitrateRequest | `u32 bitrate_kbps` |
 | 5 | Ping | `u64 ts_us` |
@@ -52,6 +52,11 @@ Maximum length is 65536. A decoder that sees `Truncated` should read more bytes 
 | 8 | AudioConfig | `u32 sample_rate`, `u8 channels` (PC to headset, 0 = none), `u16 frame_samples` (per channel, per packet), `u8 mic_channels` (headset to PC, 0 = none) |
 
 ## Video packets (implemented)
+
+The optional `StreamConfig.layout` byte is `0` or absent for mono, and `1` for side-by-side
+stereo. For stereo, `width` is the full encoded image width; the client displays the left and
+right halves to their matching eyes. Existing readers ignore the trailing byte, and new readers
+default to mono when it is absent.
 
 24-byte header followed by `payload_len` bytes of encoded bitstream.
 

@@ -42,6 +42,14 @@ You need Rust, ffmpeg on your PATH, and a Quest with developer mode enabled.
    `hevc_vaapi` (AMD/Intel, Linux), `libx265` (CPU). Desktop capture uses `gdigrab` on Windows
    and `x11grab` on Linux (X11 or XWayland only).
 
+    A side-by-side stereo video file can be shown with one half per eye:
+
+    ```
+    cargo run -p kitvr-server --release -- --source file:stereo.mp4 --width 3664 --height 1920 --stereo-sbs
+    ```
+
+    `--width` is the combined image width. This does not yet capture live SteamVR frames.
+
 ### Optional desktop app
 
 Build the desktop GUI and server together so the server executable sits beside the app:

@@ -29,6 +29,7 @@ pub struct Settings {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    pub stereo_sbs: bool,
     /// Frames between keyframes. Also the worst-case recovery time after packet loss.
     pub gop: u32,
 }
@@ -42,6 +43,7 @@ impl Default for Settings {
             height: 1080,
             fps: 60,
             bitrate_kbps: 40_000,
+            stereo_sbs: false,
             gop: 60,
         }
     }
@@ -122,6 +124,7 @@ pub fn ffmpeg_args(s: &Settings) -> Vec<String> {
         "dump_extra=freq=keyframe,hevc_metadata=aud=insert",
         "-flush_packets",
         "1",
+        "-an",
         "-f",
         "hevc",
         "pipe:1",
@@ -285,6 +288,7 @@ mod tests {
         let args = ffmpeg_args(&Settings::default());
         assert!(args.contains(&"libx265".to_string()));
         assert!(args.contains(&"pipe:1".to_string()));
+        assert!(args.contains(&"-an".to_string()));
         assert!(args.iter().any(|a| a.starts_with("testsrc2=size=1920x1080")));
     }
 }
