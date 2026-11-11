@@ -13,6 +13,7 @@ target_include_directories(native_app_glue PUBLIC
 
 add_library(kitvr SHARED
     main.cpp
+    wait_scene.cpp
     session.cpp
     decoder.cpp
     audio.cpp)

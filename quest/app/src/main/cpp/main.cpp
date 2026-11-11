@@ -26,6 +26,7 @@
 
 #include "log.h"
 #include "session.h"
+#include "wait_scene.h"
 
 #define CHECK(call)                                                           \
     do {                                                                      \
@@ -123,6 +124,7 @@ struct AppState {
     uint64_t lastPermCheckUs = 0;
 
     kitvr::Session net;
+    WaitScene waitScene;
 };
 
 // ---------------------------------------------------------------- host lookup
@@ -871,7 +873,10 @@ void renderFrame(AppState& S) {
     XrCompositionLayerQuad rightQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
     const XrCompositionLayerBaseHeader* layers[2] = {nullptr, nullptr};
     uint32_t layerCount = 0;
-    if (fs.shouldRender && S.videoSwapchain != XR_NULL_HANDLE && S.cfg.height > 0) {
+    if (fs.shouldRender && (!S.net.mediaRunning() || !S.net.videoHasRenderedFrame())) {
+        const auto* waiting = S.waitScene.render(S.session, S.viewSpace, fs.predictedDisplayTime);
+        if (waiting) layers[layerCount++] = waiting;
+    } else if (fs.shouldRender && S.videoSwapchain != XR_NULL_HANDLE && S.cfg.height > 0) {
         const uint32_t eyeWidth = S.cfg.stereoSbs && S.cfg.width >= 2 && S.cfg.width % 2 == 0
                                       ? S.cfg.width / 2
                                       : S.cfg.width;
@@ -914,6 +919,7 @@ void renderFrame(AppState& S) {
 void cleanup(AppState& S) {
     S.net.shutdown();
     teardownVideo(S);
+    S.waitScene.destroy();
     if (S.bodyTracker != XR_NULL_HANDLE && S.destroyBodyTracker) {
         S.destroyBodyTracker(S.bodyTracker);
         S.bodyTracker = XR_NULL_HANDLE;
@@ -955,6 +961,9 @@ void android_main(android_app* app) {
         cleanup(S);
         ANativeActivity_finish(app->activity);
         return;
+    }
+    if (!S.waitScene.initialize(S.instance, S.systemId, S.session)) {
+        LOGW("waiting scene unavailable; continuing without it");
     }
     if (!createHandTrackers(S)) {
         LOGW("hand tracking setup failed; continuing without it");

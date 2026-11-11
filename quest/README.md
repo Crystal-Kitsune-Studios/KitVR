@@ -16,8 +16,9 @@ Android app (Java launcher and C++ via the NDK) using OpenXR. One APK for Quest 
   If Touch controllers are not active, OpenXR hand tracking can map palm pose and pinch/grab to
   controller inputs. On runtimes that expose Meta's full-body joint set, selected body trackers
   are also sent to the SteamVR driver. The first head packet tells the server where to send video.
-6. Optional waiting music plays quietly while connecting and fades out when the first video frame
-  renders. Turn it off with the **Play music while waiting for video** checkbox in the launcher.
+6. An animated connecting scene fills the headset view while waiting for the first video frame.
+  Optional waiting music plays quietly and fades out when that frame renders. Turn it off with
+  **Music while connecting** in the launcher.
 
 ```
 app/src/main/
@@ -26,6 +27,7 @@ app/src/main/
   res/xml/file_paths.xml                         secure APK sharing for installation
   cpp/
     main.cpp      OpenXR setup, event loop, quad layer
+    wait_scene.*  animated immersive connecting scene
     session.*     control channel, UDP receive, frame reassembly, keyframe requests
     decoder.*     AMediaCodec wrapper (low-latency HEVC)
     audio.*       AAudio playback of PC audio and microphone capture
