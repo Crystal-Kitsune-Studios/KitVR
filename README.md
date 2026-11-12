@@ -10,6 +10,7 @@ crates/proto    wire protocol (no dependencies, fully unit tested)
 crates/core     platform-neutral traits: CaptureSource, VideoEncoder, InputInjector
 crates/server   PC server binary; bridge.rs streams via ffmpeg, platform/ holds native backends
 crates/desktop  optional Windows/Linux GUI for configuring and starting the PC server
+linux/vklayer   Vulkan layer that captures vrcompositor frames on Linux (see linux/README.md)
 quest/          Android NDK + OpenXR client (see quest/README.md)
 docs/PROTOCOL.md  normative protocol description
 SECURITY.md     supported versions and how to report vulnerabilities
@@ -175,9 +176,14 @@ Replacing the bridge with the native backends in `crates/server/src/platform/` r
 | Quest client: OpenXR, MediaCodec, networking | implemented; tested on Quest 2 |
 | Audio: PC to headset, and microphone to PC | implemented, untested on hardware |
 | Controller and hand input | basic controller emulation and opt-in mouse control |
+| SteamVR frames on Linux (Vulkan layer) | implemented, unverified on hardware |
 | Authentication and encryption | not started |
 
 SteamVR streaming and body tracking remain experimental and depend on runtime and hardware support.
+
+On Linux the SteamVR driver cannot receive frames at all, because SteamVR for Linux does not hand
+them to drivers. KitVR captures them with a Vulkan layer loaded into vrcompositor instead, and
+`kitvr-server --source steamvr` streams the result. See [linux/README.md](linux/README.md).
 
 ## Next steps
 

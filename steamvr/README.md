@@ -13,4 +13,9 @@ The controller profile supplies default legacy-game and SteamVR dashboard bindin
 
 Remove it with `vrpathreg removedriver <path-to-kitvr-directory>`.
 
+On Linux the frame path above does not exist, because SteamVR for Linux does not start the
+compositor when a driver exposes `IVRVirtualDisplay` and does not implement
+`IVRDriverDirectModeComponent` at all. The driver only returns `IVRVirtualDisplay` on Windows; on
+Linux, frames are captured by the Vulkan layer described in [../linux/README.md](../linux/README.md).
+
 This is not yet a complete wireless HMD driver: it does not capture the SteamVR virtual-display frame for transmission to the Quest. The Quest client can present a side-by-side stereo video file through the normal stream path with the server's `--stereo-sbs` option, but live SteamVR game frames are not yet displayed in the headset. Lower-body trackers require the runtime's Meta full-body extension; older runtimes provide torso joints only or no body tracking.
