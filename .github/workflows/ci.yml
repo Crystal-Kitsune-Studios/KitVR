@@ -26,6 +26,47 @@ jobs:
       - run: cargo build --workspace
       - run: cargo test --workspace
 
+  vklayer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Vulkan headers and CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake libvulkan-dev
+      - name: Build the Vulkan layer
+        run: |
+          cmake -S linux/vklayer -B linux/vklayer/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build linux/vklayer/build
+          cmake --install linux/vklayer/build --prefix linux/vklayer/package
+      - name: Package the layer with its installer
+        run: |
+          mkdir -p layer-package/kitvr-layer
+          cp -r linux/vklayer/package/kitvr/. layer-package/kitvr-layer/
+          cp linux/install.sh linux/vrcompositor-wrapper.sh linux/README.md layer-package/kitvr-layer/
+          tar -C layer-package -czf KitVR-vklayer-linux-x86_64.tar.gz kitvr-layer
+      - name: Upload the layer
+        uses: actions/upload-artifact@v4
+        with:
+          name: kitvr-desktop-linux-vklayer
+          path: KitVR-vklayer-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  flatpak:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: KitVR-linux-x86_64.flatpak
+          manifest-path: packaging/flatpak/com.crystalkitsune.KitVR.yaml
+          cache-key: flatpak-${{ github.sha }}
+      - name: Upload the Flatpak
+        uses: actions/upload-artifact@v4
+        with:
+          name: kitvr-desktop-linux-flatpak
+          path: KitVR-linux-x86_64.flatpak
+          if-no-files-found: error
+
   quest-apk:
     runs-on: ubuntu-24.04
     steps:
@@ -136,7 +177,7 @@ jobs:
 
   release-apk:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: desktop-package
+    needs: [desktop-package, vklayer, flatpak]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -195,3 +236,4 @@ jobs:
             release-assets/*.zip
             release-assets/*.AppImage
             release-assets/*.tar.gz
+            release-assets/*.flatpak
