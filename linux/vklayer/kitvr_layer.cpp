@@ -81,7 +81,11 @@ public:
 
         const char* name = std::getenv("KITVR_STEAMVR_SHM");
         if (name == nullptr || name[0] == '\0') name = "kitvr-steamvr";
-        const std::string path = std::string("/dev/shm/") + name;
+        // Overridable so a sandboxed server (for example a Flatpak) can be pointed at a directory
+        // both sandboxes can see.
+        const char* directory = std::getenv("KITVR_STEAMVR_SHM_DIR");
+        if (directory == nullptr || directory[0] == '\0') directory = "/dev/shm";
+        const std::string path = std::string(directory) + "/" + name;
 
         const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0666);
         if (fd < 0) {

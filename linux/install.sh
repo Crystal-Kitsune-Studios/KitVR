@@ -12,8 +12,17 @@ set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN_DIR="${STEAMVR_DIR:-$HOME/.steam/steam/steamapps/common/SteamVR}/bin/linux64"
-LAYER_SRC="$HERE/vklayer/build"
 LAYER_DEST="$BIN_DIR/kitvr-layer"
+
+# Works from a source checkout (vklayer/build) and from the release tarball, where the library and
+# manifest sit next to this script.
+LAYER_SRC=""
+for candidate in "$HERE/vklayer/build" "$HERE" "$HERE/kitvr-layer"; do
+    if [ -f "$candidate/libkitvr_layer.so" ] && [ -f "$candidate/kitvr_layer.json" ]; then
+        LAYER_SRC="$candidate"
+        break
+    fi
+done
 
 if [ ! -d "$BIN_DIR" ]; then
     echo "SteamVR bin directory not found at $BIN_DIR" >&2
@@ -34,7 +43,8 @@ if [ "${1:-}" = "--uninstall" ]; then
     exit 0
 fi
 
-if [ ! -f "$LAYER_SRC/libkitvr_layer.so" ]; then
+if [ -z "$LAYER_SRC" ]; then
+    echo "Could not find libkitvr_layer.so and kitvr_layer.json next to this script." >&2
     echo "Build the layer first:" >&2
     echo "  cmake -S linux/vklayer -B linux/vklayer/build" >&2
     echo "  cmake --build linux/vklayer/build" >&2
@@ -43,7 +53,7 @@ fi
 
 mkdir -p "$LAYER_DEST"
 cp "$LAYER_SRC/libkitvr_layer.so" "$LAYER_DEST/"
-cp "$HERE/vklayer/kitvr_layer.json" "$LAYER_DEST/"
+cp "$LAYER_SRC/kitvr_layer.json" "$LAYER_DEST/"
 
 if [ ! -f "$BIN_DIR/vrcompositor.real" ]; then
     mv "$BIN_DIR/vrcompositor" "$BIN_DIR/vrcompositor.real"
