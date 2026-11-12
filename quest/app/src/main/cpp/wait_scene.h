@@ -32,6 +32,8 @@ private:
     GLuint vertexArray_ = 0;
     GLint timeUniform_ = -1;
     GLint sizeUniform_ = -1;
+    GLint samplerUniform_ = -1;
+    GLuint texture_ = 0;
     uint64_t startUs_ = 0;
     bool renderFailed_ = false;
 };
