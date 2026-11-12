@@ -73,7 +73,7 @@ modules:
       env:
         CARGO_HOME: /run/build/kitvr/cargo
     build-commands:
-      - cargo build --release --locked -p kitvr-desktop -p kitvr-server -p kitvr-updater
+      - cargo build --release --locked -p kitvr-desktop -p kitvr-server
       - install -Dm755 target/release/kitvr-desktop /app/bin/kitvr-desktop.real
       - install -Dm755 target/release/kitvr-server /app/bin/kitvr-server
       - install -Dm755 target/release/kitvr-updater /app/bin/kitvr-updater
