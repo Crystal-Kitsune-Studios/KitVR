@@ -50,7 +50,7 @@ jobs:
           path: KitVR-vklayer-linux-x86_64.tar.gz
           if-no-files-found: error
 
-    flatpak:
+  flatpak:
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
@@ -64,7 +64,7 @@ jobs:
           manifest-path: packaging/flatpak/com.crystalkitsune.KitVR.yaml
           cache-key: flatpak-${{ github.sha }}
           artifact-name: kitvr-desktop-linux-flatpak
-          
+
   quest-apk:
     runs-on: ubuntu-24.04
     steps:
