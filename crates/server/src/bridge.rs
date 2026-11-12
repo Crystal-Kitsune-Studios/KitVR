@@ -23,6 +23,9 @@ pub enum Source {
     File(String),
     #[cfg(target_os = "linux")]
     Wayland(Arc<crate::wayland::WaylandCapture>),
+    /// Frames captured from vrcompositor by the KitVR Vulkan layer (Linux only).
+    #[cfg(target_os = "linux")]
+    SteamVr(Arc<crate::steamvr::SteamVrRing>),
 }
 
 #[cfg(target_os = "linux")]
@@ -95,9 +98,24 @@ pub fn ffmpeg_args(s: &Settings) -> Vec<String> {
             a.push(format!("{}x{}", s.width, s.height));
             a.extend(v(&["-framerate", fps.as_str(), "-i", "pipe:0"]));
         }
+        #[cfg(target_os = "linux")]
+        Source::SteamVr(ring) => {
+            // The input geometry is whatever the layer captured; --width and --height scale it.
+            a.extend(v(&["-f", "rawvideo", "-pixel_format", ring.pixel_format(), "-video_size"]));
+            a.push(format!("{}x{}", ring.width(), ring.height()));
+            a.extend(v(&["-framerate", fps.as_str(), "-i", "pipe:0"]));
+        }
     }
 
-    let mut vf = format!("scale={}:{},fps={},vflip", s.width, s.height, s.fps);
+    let mut vf = format!("scale={}:{},fps={}", s.width, s.height, s.fps);
+    // A captured framebuffer is already the right way up; only captured desktop frames are flipped.
+    #[cfg(target_os = "linux")]
+    let flip = !matches!(s.source, Source::SteamVr(_));
+    #[cfg(not(target_os = "linux"))]
+    let flip = true;
+    if flip {
+        vf.push_str(",vflip");
+    }
     let mut enc: Vec<String> = Vec::new();
     match s.encoder.as_str() {
         "hevc_nvenc" => enc.extend(v(&["-c:v", "hevc_nvenc", "-preset", "p1", "-tune", "ull", "-rc", "cbr", "-zerolatency", "1", "-delay", "0"])),
@@ -232,6 +250,9 @@ pub fn run(
         command.stdin(Stdio::from(stdout));
         configure_child_lifetime(&mut command);
         capture = Some(producer);
+    } else if matches!(settings.source, Source::SteamVr(_)) {
+        command.stdin(Stdio::piped());
+        configure_child_lifetime(&mut command);
     } else {
         command.stdin(Stdio::null());
     }
@@ -249,6 +270,16 @@ pub fn run(
         }
     };
     let mut out = child.stdout.take().expect("piped stdout");
+
+    // The capture thread owns ffmpeg's stdin and stops when the ring goes quiet and `stop` is set,
+    // or when ffmpeg exits and the pipe breaks.
+    #[cfg(target_os = "linux")]
+    let feeder = match &settings.source {
+        Source::SteamVr(ring) => child.stdin.take().map(|stdin| {
+            spawn_ring_feeder(Arc::clone(ring), stdin, settings.fps, StopFlag(stop as *const AtomicBool))
+        }),
+        _ => None,
+    };
 
     let mut splitter = AuSplitter::new();
     let mut tmp = vec![0u8; 64 * 1024];
@@ -305,11 +336,50 @@ pub fn run(
     }
     let _ = child.kill();
     let _ = child.wait();
+    #[cfg(target_os = "linux")]
+    if let Some(handle) = feeder {
+        let _ = handle.join();
+    }
     if let Some(mut producer) = capture {
         let _ = producer.kill();
         let _ = producer.wait();
     }
     result
+}
+
+/// A raw pointer to the caller's stop flag. The feeder thread is always joined before `run`
+/// returns, so the reference outlives it.
+#[cfg(target_os = "linux")]
+struct StopFlag(*const AtomicBool);
+
+#[cfg(target_os = "linux")]
+unsafe impl Send for StopFlag {}
+
+#[cfg(target_os = "linux")]
+fn spawn_ring_feeder(
+    ring: Arc<crate::steamvr::SteamVrRing>,
+    mut stdin: std::process::ChildStdin,
+    fps: u32,
+    stop: StopFlag,
+) -> std::thread::JoinHandle<()> {
+    use std::io::Write;
+    let interval = std::time::Duration::from_micros(1_000_000 / fps.max(1) as u64);
+    std::thread::spawn(move || {
+        // Capture the wrapper as a whole; a disjoint field capture would grab the raw pointer.
+        let stop = stop;
+        let mut frame = Vec::new();
+        while !unsafe { (*stop.0).load(Ordering::Relaxed) } {
+            if !ring.read_frame(&mut frame) {
+                std::thread::sleep(interval);
+                continue;
+            }
+            if stdin.write_all(&frame).is_err() {
+                break;
+            }
+        }
+        // Dropping stdin lets ffmpeg finish, which ends the read loop in `run`.
+        drop(stdin);
+    })
 }
 
 #[cfg(target_os = "linux")]

@@ -4,6 +4,8 @@ mod bridge;
 mod mouse;
 mod platform;
 #[cfg(target_os = "linux")]
+mod steamvr;
+#[cfg(target_os = "linux")]
 mod wayland;
 
 use std::io::{self, Read, Write};
@@ -31,7 +33,10 @@ const USAGE: &str = "\
 kitvr-server [options]
 
 Video:
-  --source testpattern|desktop|file:<path>   what to stream (default testpattern)
+  --source testpattern|desktop|file:<path>|steamvr
+                                             what to stream (default testpattern)
+                                             steamvr reads the frames the KitVR Vulkan layer
+                                             captures from vrcompositor on Linux
   --encoder libx265|hevc_nvenc|hevc_amf|hevc_qsv|hevc_vaapi   (default libx265)
     --width N --height N --fps N               encoded frame size and rate (default 1920 1080 60)
     --stereo-sbs                                file input is side-by-side; width is both eyes
@@ -59,6 +64,15 @@ fn parse_number(option: &str, value: &str) -> Result<u32, String> {
     value.parse().map_err(|_| format!("{option} requires an unsigned integer"))
 }
 
+fn stereo_capable(source: &bridge::Source) -> bool {
+    match source {
+        bridge::Source::File(_) => true,
+        #[cfg(target_os = "linux")]
+        bridge::Source::SteamVr(_) => true,
+        _ => false,
+    }
+}
+
 fn validate_settings(settings: &bridge::Settings) -> Result<(), &'static str> {
     if settings.width < 2 || settings.width > u16::MAX as u32 || settings.width % 2 != 0 {
         return Err("--width must be even and between 2 and 65534");
@@ -75,8 +89,8 @@ fn validate_settings(settings: &bridge::Settings) -> Result<(), &'static str> {
     if settings.gop == 0 {
         return Err("--gop must be greater than zero");
     }
-    if settings.stereo_sbs && !matches!(&settings.source, bridge::Source::File(_)) {
-        return Err("--stereo-sbs requires --source file:<path> with side-by-side video");
+    if settings.stereo_sbs && !stereo_capable(&settings.source) {
+        return Err("--stereo-sbs requires --source file:<path> or --source steamvr");
     }
     Ok(())
 }
@@ -94,6 +108,25 @@ fn parse_args() -> (bridge::Settings, audio::AudioSettings, bool) {
                 s.source = match v.as_str() {
                     "testpattern" => bridge::Source::TestPattern,
                     "desktop" => bridge::Source::Desktop,
+                    "steamvr" => {
+                        #[cfg(target_os = "linux")]
+                        {
+                            let name = std::env::var("KITVR_STEAMVR_SHM")
+                                .unwrap_or_else(|_| steamvr::DEFAULT_NAME.to_string());
+                            match steamvr::SteamVrRing::open(&name) {
+                                Ok(ring) => bridge::Source::SteamVr(ring),
+                                Err(error) => {
+                                    eprintln!("{error}");
+                                    std::process::exit(2);
+                                }
+                            }
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            eprintln!("--source steamvr is only available on Linux");
+                            std::process::exit(2);
+                        }
+                    }
                     other => match other.strip_prefix("file:") {
                         Some(p) => bridge::Source::File(p.to_string()),
                         None => {
