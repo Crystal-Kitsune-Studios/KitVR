@@ -40,7 +40,9 @@ kitvr-server --source steamvr --stereo-sbs
 `--stereo-sbs` treats the captured image as one eye per half. Drop it for a mono stream.
 `--width` and `--height` scale the captured image, so you can stream below the capture resolution.
 
-Both sides read `KITVR_STEAMVR_SHM` for the ring name, which defaults to `kitvr-steamvr`.
+Both sides read `KITVR_STEAMVR_SHM` for the ring name, which defaults to `kitvr-steamvr`, and
+`KITVR_STEAMVR_SHM_DIR` for the directory, which defaults to `/dev/shm`. Set both to the same values
+when the layer and the server are in different sandboxes, such as when the server is a Flatpak.
 
 ## Shared memory ring
 

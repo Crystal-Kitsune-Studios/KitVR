@@ -52,15 +52,22 @@ impl SteamVrRing {
     /// Maps the ring published by the layer. Fails when SteamVR is not running or the layer is not
     /// installed, which is the common case and worth a clear message.
     pub fn open(name: &str) -> io::Result<Arc<Self>> {
-        let path = CString::new(format!("/dev/shm/{name}"))
+        // Overridable so a sandboxed server (for example a Flatpak) can be pointed at a directory
+        // both sandboxes can see.
+        let directory = std::env::var("KITVR_STEAMVR_SHM_DIR")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "/dev/shm".to_string());
+        let full_path = format!("{directory}/{name}");
+        let path = CString::new(full_path.clone())
             .map_err(|_| io::Error::other("invalid SteamVR shared memory name"))?;
         let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
         if fd < 0 {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
-                    "no SteamVR frame ring at /dev/shm/{name}. Start SteamVR with the KitVR layer \
-                     installed, or set KITVR_STEAMVR_SHM to the name the layer is using."
+                    "no SteamVR frame ring at {full_path}. Start SteamVR with the KitVR layer \
+                     installed, or set KITVR_STEAMVR_SHM and KITVR_STEAMVR_SHM_DIR to match the layer."
                 ),
             ));
         }
