@@ -1,0 +1,90 @@
+app-id: com.crystalkitsune.KitVR
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: kitvr-desktop
+
+finish-args:
+  # --share=ipc is what lets the server read the frame ring the SteamVR layer publishes in
+  # /dev/shm. If Steam is itself the Flatpak, it needs the same flag on its side.
+  - --share=ipc
+  - --share=network
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=dri
+  - --talk-name=org.freedesktop.portal.Desktop
+  - --filesystem=xdg-run/pipewire-0
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+  - '*.a'
+  - '*.la'
+
+modules:
+  - name: x265
+    buildsystem: simple
+    build-commands:
+      - >-
+        cmake -S source -B build -G Ninja
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_PREFIX=/app
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DENABLE_CLI=OFF
+        -DENABLE_SHARED=OFF
+      - cmake --build build -j "$FLATPAK_BUILDER_N_JOBS"
+      - cmake --install build
+    sources:
+      - type: archive
+        url: https://download.videolan.org/pub/videolan/x265/x265_3.6.tar.gz
+        sha256: 663531f341c5389f460d730e62e10a4fcca3428ca2ca109693867bc5fe2e2807
+
+  - name: ffmpeg
+    buildsystem: simple
+    build-commands:
+      # KitVR shells out to the ffmpeg binary, so it is built here rather than pulled from a
+      # runtime extension that only ships libraries.
+      - >-
+        ./configure
+        --prefix=/app
+        --disable-doc
+        --disable-debug
+        --disable-static
+        --enable-shared
+        --enable-gpl
+        --enable-libx265
+      - make -j "$FLATPAK_BUILDER_N_JOBS"
+      - make install
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
+        sha256: 40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6
+
+  - name: kitvr
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/kitvr/cargo
+    build-commands:
+      - cargo build --release --locked -p kitvr-desktop -p kitvr-server -p kitvr-updater
+      - install -Dm755 target/release/kitvr-desktop /app/bin/kitvr-desktop.real
+      - install -Dm755 target/release/kitvr-server /app/bin/kitvr-server
+      - install -Dm755 target/release/kitvr-updater /app/bin/kitvr-updater
+      - install -Dm755 packaging/flatpak/kitvr-launch.sh /app/bin/kitvr-desktop
+      - install -Dm644 packaging/flatpak/com.crystalkitsune.KitVR.desktop /app/share/applications/com.crystalkitsune.KitVR.desktop
+      - install -Dm644 packaging/kitvr.svg /app/share/icons/hicolor/scalable/apps/com.crystalkitsune.KitVR.svg
+      - install -Dm644 packaging/flatpak/com.crystalkitsune.KitVR.metainfo.xml /app/share/metainfo/com.crystalkitsune.KitVR.metainfo.xml
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - target
+          - linux/vklayer/build
+          - linux/vklayer/package
+          - quest/build

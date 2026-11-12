@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.crystalkitsune.KitVR</id>
+  <name>KitVR</name>
+  <summary>Stream a PC desktop or SteamVR to a Quest headset</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      KitVR streams a Windows or Linux PC to a Quest 2, 3, or 3S over the local network, in the
+      spirit of Virtual Desktop.
+    </p>
+    <p>
+      On Linux it also captures SteamVR by loading a Vulkan layer into vrcompositor, because
+      SteamVR for Linux does not hand frames to OpenVR drivers.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.crystalkitsune.KitVR.desktop</launchable>
+  <url type="homepage">https://crystal-kitsune-studios.com</url>
+  <url type="bugtracker">https://github.com/Crystal-Kitsune-Studios/KitVR/issues</url>
+  <developer id="com.crystalkitsune">
+    <name>Crystal Kitsune Studios</name>
+  </developer>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-11-12" />
+  </releases>
+</component>
