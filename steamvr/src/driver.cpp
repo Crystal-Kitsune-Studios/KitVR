@@ -104,9 +104,14 @@ public:
         if (std::strcmp(name, vr::IVRDisplayComponent_Version) == 0) {
             return static_cast<vr::IVRDisplayComponent*>(this);
         }
+#ifdef _WIN32
+        // SteamVR for Linux fails to start the compositor when a driver exposes IVRVirtualDisplay
+        // ("Shared IPC Compositor Init Failed"), so this path stays Windows only. On Linux the
+        // frames come from the Vulkan layer in linux/vklayer instead.
         if (std::strcmp(name, vr::IVRVirtualDisplay_Version) == 0) {
             return static_cast<vr::IVRVirtualDisplay*>(this);
         }
+#endif
         return nullptr;
     }
 
