@@ -16,9 +16,21 @@ Android app (Java launcher and C++ via the NDK) using OpenXR. One APK for Quest 
   If Touch controllers are not active, OpenXR hand tracking can map palm pose and pinch/grab to
   controller inputs. On runtimes that expose Meta's full-body joint set, selected body trackers
   are also sent to the SteamVR driver. The first head packet tells the server where to send video.
-6. An animated connecting scene fills the headset view while waiting for the first video frame.
+  Hand tracking currently emulates basic controller inputs rather than streaming finger skeletons.
+6. An animated connecting scene fills the headset view while waiting for the first video frame,
+  including after a control reconnection.
   Optional waiting music plays quietly and fades out when that frame renders. Turn it off with
   **Music while connecting** in the launcher.
+
+If the headset session stops and resumes, the client reconnects the control channel so the server
+can learn the new UDP media address. An unresponsive control connection is retried after five
+seconds without incoming control traffic.
+
+For desktop mouse control, enable it explicitly on the PC and use the right hand or controller:
+move it to move the pointer, pinch or trigger for left-click, and grab or grip for right-click.
+Only enable this on a trusted network; the connection is not authenticated.
+Body tracking depends on headset and runtime support: a Quest 2 may not expose the body-tracking
+extension, and lower-body poses on supported headsets may be inferred rather than measured.
 
 ```
 app/src/main/
@@ -54,7 +66,8 @@ The application id is `com.crystalkitsune.kitvr`. Change it in `app/build.gradle
 
 1. Enable developer mode on the headset and connect adb (`adb connect <quest-ip>:5555`).
 2. Install: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
-3. Launch KitVR from the Quest library and select **Find PCs** to discover your server, or enter
+3. Start streaming in KitVR Desktop on the PC. Launch KitVR from the Quest library and select
+  **Find PCs** to discover your server over Wi-Fi, or enter
   its IP address manually. Select **Connect**; the address is saved for the next launch. You can
   also launch the immersive client directly with an extra:
   `adb shell am start -n com.crystalkitsune.kitvr/.KitVrActivity --es host 192.168.1.50`
@@ -70,7 +83,7 @@ installed app.
 
 ## Things to check first if it does not work
 
-The client has not been verified on Quest hardware; expect device-specific issues on first run.
+The client has been tested on Quest 2; device-specific issues may still occur.
 
 - **Swapchain creation fails.** `setupVideo()` sets `usageFlags` to color attachment plus sampled.
   If the runtime rejects it, try `0` or only `XR_SWAPCHAIN_USAGE_SAMPLED_BIT`. The spec requires

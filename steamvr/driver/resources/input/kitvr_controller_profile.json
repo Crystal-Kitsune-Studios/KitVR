@@ -1,14 +1,24 @@
 {
   "jsonid": "input_profile",
   "controller_type": "kitvr_touch",
+  "device_class": "TrackedDeviceClass_Controller",
+  "resource_root": "kitvr",
+  "driver_name": "kitvr",
   "input_bindingui_mode": "controller_handed",
+  "legacy_binding": "{kitvr}/input/legacy_bindings_kitvr_touch.json",
   "input_source": {
-    "/input/trigger": { "type": "trigger", "order": 1 },
-    "/input/grip": { "type": "trigger", "order": 2 },
-    "/input/primary": { "type": "button", "order": 3 },
-    "/input/secondary": { "type": "button", "order": 4 },
-    "/input/menu": { "type": "button", "order": 5 },
-    "/input/joystick": { "type": "joystick", "order": 6 },
+    "/input/trigger": { "type": "trigger", "value": true, "click": true, "order": 1 },
+    "/input/grip": { "type": "trigger", "value": true, "click": true, "order": 2 },
+    "/input/primary": { "type": "button", "click": true, "order": 3 },
+    "/input/secondary": { "type": "button", "click": true, "order": 4 },
+    "/input/menu": { "type": "button", "click": true, "order": 5 },
+    "/input/joystick": { "type": "joystick", "click": true, "order": 6 },
     "/pose/raw": { "type": "pose" }
-  }
+  },
+  "default_bindings": [
+    {
+      "app_key": "openvr.component.vrcompositor",
+      "binding_url": "vrcompositor_bindings_kitvr_touch.json"
+    }
+  ]
 }

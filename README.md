@@ -40,7 +40,13 @@ You need Rust, ffmpeg on your PATH, and a Quest with developer mode enabled.
 
    Encoders: `hevc_nvenc` (NVIDIA), `hevc_amf` (AMD, Windows), `hevc_qsv` (Intel),
    `hevc_vaapi` (AMD/Intel, Linux), `libx265` (CPU). Desktop capture uses `gdigrab` on Windows
-   and `x11grab` on Linux (X11 or XWayland only).
+   and `x11grab` on Linux X11. On Wayland, select a screen or window in the desktop
+   screen-sharing dialog. Wayland capture requires PipeWire, a ScreenCast-capable
+   xdg-desktop-portal backend, `gst-launch-1.0`, and the GStreamer `pipewiresrc`,
+   `videoconvert`, `videoscale`, `videorate`, `queue`, and `fdsink` plugins.
+   If desktop detail breaks up at low bitrates, try a higher bitrate (for example
+   `--bitrate-kbps 20000` at 1280x720) if your network can sustain it.
+   Width and height must be even, nonzero 16-bit values; fps, bitrate and GOP must be positive.
 
     A side-by-side stereo video file can be shown with one half per eye:
 
@@ -65,13 +71,22 @@ existing `kitvr-server` command-line workflow remains available without the GUI.
 saved between launches. On first launch, the app walks through PC setup, network requirements, and
 connecting from the Quest; open **Tutorial** in the header to revisit it.
 
+Mouse control is opt-in: enable **hand/controller mouse** in the desktop app or pass
+`--enable-mouse` to the server. Move your right hand or controller to move the pointer;
+pinch or pull the trigger to left-click, and close your hand or squeeze the grip to right-click.
+Linux requires a desktop portal with RemoteDesktop pointer support and its permission dialog.
+Mouse control resets when tracking is lost or the client disconnects.
+**KitVR connections are not authenticated or encrypted: enable mouse control only on a trusted network.**
+The option is off at every desktop app launch.
+
 The desktop app checks GitHub Releases on startup and offers the latest platform package when it
 finds a newer version. Choose **Get update** to download and apply it; the app stops its stream and
 restarts after replacement. SteamVR is not updated by this mechanism.
 
 GitHub Actions packages Windows as `KitVR-windows-x86_64.zip` (desktop and server executables
 together) and Linux as `KitVR-linux-x86_64.AppImage`. Both packages still require FFmpeg installed
-on the PC; the AppImage bundles the GUI and KitVR server, not FFmpeg.
+on the PC; the AppImage bundles the GUI and KitVR server, not FFmpeg or the GStreamer
+tools and plugins required for Wayland capture.
 
 SteamVR builds also publish a separate `KitVR-steamvr-driver-windows-x86_64.zip` or
 `KitVR-steamvr-driver-linux-x86_64.tar.gz`. This experimental HMD driver registers the headset and
@@ -146,7 +161,7 @@ them with the KitVR packets. It works on both OSes with one code path. Known cos
 - About one extra frame of latency, because a frame is only known to be complete when the next begins.
 - Keyframe requests cannot be honored. The stream uses a fixed GOP (`--gop`, default 60 frames),
   so recovery after packet loss takes up to one second.
-- No input injection yet, and no Wayland capture. Audio is raw PCM, not compressed.
+- Mouse control is opt-in and unauthenticated. Audio is raw PCM, not compressed.
 
 Replacing the bridge with the native backends in `crates/server/src/platform/` removes these.
 
@@ -155,23 +170,21 @@ Replacing the bridge with the native backends in `crates/server/src/platform/` r
 | Piece | State |
 |---|---|
 | Protocol: control, video, tracking | implemented in Rust and C++ |
-| Server: ffmpeg bridge (Windows and Linux) | implemented, untested on hardware |
+| Server: ffmpeg bridge (Windows and Linux) | implemented; Wayland tested with Quest 2 |
 | Server: native capture, encode, input | stubs |
-| Quest client: OpenXR, MediaCodec, networking | implemented, untested on hardware |
+| Quest client: OpenXR, MediaCodec, networking | implemented; tested on Quest 2 |
 | Audio: PC to headset, and microphone to PC | implemented, untested on hardware |
-| Controller and hand input | not started |
+| Controller and hand input | basic controller emulation and opt-in mouse control |
 | Authentication and encryption | not started |
 
-Nothing here has been compiled or run yet. Expect to fix a few compile errors and
-device-specific issues on first build.
+SteamVR streaming and body tracking remain experimental and depend on runtime and hardware support.
 
 ## Next steps
 
 1. Get the test pattern showing in the headset.
 2. Desktop capture with a hardware encoder, then measure latency.
-3. Controller pointer to mouse input.
-4. Native capture and encode backends (removes the bridge's limits).
-5. Pairing and encrypted media.
+3. Native capture and encode backends (removes the bridge's limits).
+4. Pairing and encrypted media.
 
 ## License
 

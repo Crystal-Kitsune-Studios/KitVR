@@ -1,4 +1,7 @@
 #include "openvr_driver.h"
+#include "view_config.h"
+#include "hand_state.h"
+#include "tracking_sequence.h"
 
 #include <array>
 #include <chrono>
@@ -45,15 +48,7 @@ constexpr uint16_t kSecondaryClick = 1u << 3;
 constexpr uint16_t kMenuClick = 1u << 4;
 constexpr uint16_t kThumbstickClick = 1u << 5;
 
-struct HandState {
-    uint16_t buttons = 0;
-    bool active = false;
-    float trigger = 0.0f;
-    float grip = 0.0f;
-    float stickX = 0.0f;
-    float stickY = 0.0f;
-    float pose[7] = {0, 0, 0, 0, 0, 0, 1};
-};
+using kitvr::HandState;
 
 struct BodyTrackerState {
     bool active = false;
@@ -79,12 +74,18 @@ float readF32Le(const uint8_t* bytes) {
     return value;
 }
 
+vr::HmdMatrix34_t poseMatrix(const float* pose);
+
 class Hmd final : public vr::ITrackedDeviceServerDriver,
                   public vr::IVRDisplayComponent,
                   public vr::IVRVirtualDisplay {
 public:
     vr::EVRInitError Activate(uint32_t objectId) override {
         objectId_ = objectId;
+        {
+            std::lock_guard<std::mutex> lock(geometryMutex_);
+            geometryApplied_ = false;
+        }
         const auto container = vr::VRProperties()->TrackedDeviceToPropertyContainer(objectId);
         vr::VRProperties()->SetStringProperty(container, vr::Prop_TrackingSystemName_String, "KitVR");
         vr::VRProperties()->SetStringProperty(container, vr::Prop_ModelNumber_String, "KitVR Streamed HMD");
@@ -147,7 +148,7 @@ public:
     bool IsDisplayRealDisplay() override { return false; }
 
     void GetRecommendedRenderTargetSize(uint32_t* width, uint32_t* height) override {
-        *width = kEyeWidth * 2;
+        *width = kEyeWidth;
         *height = kEyeHeight;
     }
 
@@ -159,12 +160,46 @@ public:
         *height = kEyeHeight;
     }
 
-    void GetProjectionRaw(vr::EVREye, float* left, float* right,
+    void GetProjectionRaw(vr::EVREye eye, float* left, float* right,
                           float* top, float* bottom) override {
-        *left = -1.1f;
-        *right = 1.1f;
-        *top = -1.0f;
-        *bottom = 1.0f;
+        std::lock_guard<std::mutex> lock(geometryMutex_);
+        const auto& projection = projections_[eye == vr::Eye_Right ? 1 : 0];
+        *left = projection[0];
+        *right = projection[1];
+        *top = projection[2];
+        *bottom = projection[3];
+    }
+
+    void updateViews(const std::array<kitvr::EyeView, 2>& views) {
+        if (objectId_ == vr::k_unTrackedDeviceIndexInvalid) return;
+        {
+            std::lock_guard<std::mutex> lock(geometryMutex_);
+            bool changed = !geometryApplied_;
+            for (size_t eye = 0; eye < views.size(); ++eye) {
+                for (size_t i = 0; i < 4; ++i) {
+                    changed |= std::abs(views[eye].projection[i] - appliedViews_[eye].projection[i]) > 0.0001f;
+                }
+                for (size_t i = 0; i < 7; ++i) {
+                    changed |= std::abs(views[eye].eyeToHead[i] - appliedViews_[eye].eyeToHead[i]) > 0.0001f;
+                }
+            }
+            if (!changed) return;
+            for (size_t eye = 0; eye < views.size(); ++eye) projections_[eye] = views[eye].projection;
+            appliedViews_ = views;
+            geometryApplied_ = true;
+        }
+        vr::HmdRect2_t rects[2]{};
+        for (size_t eye = 0; eye < views.size(); ++eye) {
+            const auto& p = views[eye].projection;
+            rects[eye].vTopLeft.v[0] = p[0];
+            rects[eye].vTopLeft.v[1] = p[2];
+            rects[eye].vBottomRight.v[0] = p[1];
+            rects[eye].vBottomRight.v[1] = p[3];
+        }
+        auto* host = vr::VRServerDriverHost();
+        host->SetDisplayEyeToHead(objectId_, poseMatrix(views[0].eyeToHead.data()),
+                                  poseMatrix(views[1].eyeToHead.data()));
+        host->SetDisplayProjectionRaw(objectId_, rects[0], rects[1]);
     }
 
     vr::DistortionCoordinates_t ComputeDistortion(vr::EVREye, float u, float v) override {
@@ -201,6 +236,11 @@ private:
     uint32_t objectId_ = vr::k_unTrackedDeviceIndexInvalid;
     std::mutex poseMutex_;
     vr::DriverPose_t pose_{};
+    std::mutex geometryMutex_;
+    std::array<std::array<float, 4>, 2> projections_{{{{-1.1f, 1.1f, -1.0f, 1.0f}},
+                                                       {{-1.1f, 1.1f, -1.0f, 1.0f}}}};
+    std::array<kitvr::EyeView, 2> appliedViews_{};
+    bool geometryApplied_ = false;
     std::chrono::steady_clock::time_point startTime_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point lastPresent_{};
 };
@@ -297,8 +337,9 @@ public:
         input_->UpdateScalarComponent(gripValue_, hand.grip, timeOffset);
         input_->UpdateScalarComponent(thumbstickX_, hand.stickX, timeOffset);
         input_->UpdateScalarComponent(thumbstickY_, hand.stickY, timeOffset);
-        const auto matrix = poseMatrix(hand.pose);
-        input_->UpdatePoseComponent(poseComponent_, &matrix, timeOffset);
+        // The raw action pose is relative to the device pose already submitted to SteamVR.
+        const vr::HmdMatrix34_t rawOffset{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
+        input_->UpdatePoseComponent(poseComponent_, &rawOffset, timeOffset);
     }
 
 private:
@@ -454,6 +495,21 @@ public:
     const char* const* GetInterfaceVersions() override { return vr::k_InterfaceVersions; }
 
     void RunFrame() override {
+        const auto now = std::chrono::steady_clock::now();
+        if (havePose_ && now - lastPose_ > std::chrono::milliseconds(250)) {
+            const float head[7]{};
+            hmd_.updatePose(head, false);
+            leftController_.update(HandState{}, false);
+            rightController_.update(HandState{}, false);
+            havePose_ = false;
+            poseSequence_.reset();
+        }
+        if (haveBody_ && now - lastBody_ > std::chrono::milliseconds(300)) {
+            for (auto* tracker : bodyTrackers_) tracker->update(BodyTrackerState{});
+            haveBody_ = false;
+            bodySequence_.reset();
+        }
+
         std::array<uint8_t, 256> packet{};
         bool gotPose = false;
         bool gotBody = false;
@@ -468,44 +524,38 @@ public:
             const int count = static_cast<int>(recv(socket_, packet.data(), packet.size(), 0));
 #endif
             if (count < 1) break;
+            if (packet[0] == kitvr::kViewConfigPacketType) {
+                std::array<kitvr::EyeView, 2> views{};
+                if (kitvr::parseViewConfig(packet.data(), static_cast<size_t>(count), views)) {
+                    hmd_.updateViews(views);
+                }
+                continue;
+            }
             if (packet[0] == kBodyTrackingPacketType) {
                 if (count < static_cast<int>(kBodyTrackingPacketLength) || packet[1] != 1) continue;
+                if (!bodySequence_.accept(readU16Le(packet.data() + 2))) continue;
                 const uint16_t activeMask = readU16Le(packet.data() + 12);
                 for (size_t i = 0; i < body.size(); ++i) {
                     auto& tracker = body[i];
                     tracker.active = (activeMask & (1u << i)) != 0;
                     if (!tracker.active) continue;
                     const size_t offset = kBodyTrackingHeaderLength + i * 28;
-                    bool valid = true;
                     for (size_t j = 0; j < 7; ++j) {
                         tracker.pose[j] = readF32Le(packet.data() + offset + j * sizeof(float));
-                        valid &= std::isfinite(tracker.pose[j]);
                     }
-                    const float norm = std::sqrt(tracker.pose[3] * tracker.pose[3] +
-                                                 tracker.pose[4] * tracker.pose[4] +
-                                                 tracker.pose[5] * tracker.pose[5] +
-                                                 tracker.pose[6] * tracker.pose[6]);
-                    tracker.active &= valid && norm > 1e-6f;
-                    if (tracker.active) {
-                        for (size_t j = 3; j < 7; ++j) tracker.pose[j] /= norm;
-                    }
+                    tracker.active = kitvr::normalizeTrackingPose(tracker.pose);
                 }
                 gotBody = true;
                 continue;
             }
             if (count < static_cast<int>(kTrackingPacketLength) ||
                 packet[0] != kTrackingPacketType) continue;
-            bool valid = true;
             float parsed[7]{};
             for (size_t i = 0; i < 7; ++i) {
                 parsed[i] = readF32Le(packet.data() + kHeadPoseOffset + i * sizeof(float));
-                valid &= std::isfinite(parsed[i]);
             }
-            const float norm = std::sqrt(parsed[3] * parsed[3] + parsed[4] * parsed[4] +
-                                         parsed[5] * parsed[5] + parsed[6] * parsed[6]);
-            valid &= norm > 1e-6f;
-            if (valid) {
-                for (size_t i = 3; i < 7; ++i) parsed[i] /= norm;
+            if (kitvr::normalizeTrackingPose(parsed)) {
+                if (!poseSequence_.accept(readU16Le(packet.data() + 2))) continue;
                 std::copy(std::begin(parsed), std::end(parsed), std::begin(head));
                 gotPose = true;
                 for (size_t handIndex = 0; handIndex < hands.size(); ++handIndex) {
@@ -517,48 +567,29 @@ public:
                     hand.grip = readF32Le(packet.data() + offset + 8);
                     hand.stickX = readF32Le(packet.data() + offset + 12);
                     hand.stickY = readF32Le(packet.data() + offset + 16);
-                    bool handValid = std::isfinite(hand.trigger) && std::isfinite(hand.grip) &&
-                                     std::isfinite(hand.stickX) && std::isfinite(hand.stickY);
                     for (size_t i = 0; i < 7; ++i) {
                         hand.pose[i] = readF32Le(packet.data() + offset + 20 + i * sizeof(float));
-                        handValid &= std::isfinite(hand.pose[i]);
                     }
-                    const float handNorm = std::sqrt(hand.pose[3] * hand.pose[3] +
-                                                     hand.pose[4] * hand.pose[4] +
-                                                     hand.pose[5] * hand.pose[5] +
-                                                     hand.pose[6] * hand.pose[6]);
-                    hand.active &= handValid && handNorm > 1e-6f;
-                    if (hand.active) {
-                        for (size_t i = 3; i < 7; ++i) hand.pose[i] /= handNorm;
+                    const bool handValid = kitvr::validateHandState(hand);
+                    if (!handValid && !invalidHandLogged_[handIndex]) {
+                        if (auto* log = vr::VRDriverLog()) log->Log("KitVR: invalid controller tracking data");
                     }
-                    hand.trigger = std::clamp(hand.trigger, 0.0f, 1.0f);
-                    hand.grip = std::clamp(hand.grip, 0.0f, 1.0f);
-                    hand.stickX = std::clamp(hand.stickX, -1.0f, 1.0f);
-                    hand.stickY = std::clamp(hand.stickY, -1.0f, 1.0f);
+                    invalidHandLogged_[handIndex] = !handValid;
                 }
             }
         }
 
-        const auto now = std::chrono::steady_clock::now();
         if (gotPose) {
             hmd_.updatePose(head, true);
             leftController_.update(hands[0], hands[0].active);
             rightController_.update(hands[1], hands[1].active);
             lastPose_ = now;
             havePose_ = true;
-        } else if (havePose_ && now - lastPose_ > std::chrono::milliseconds(250)) {
-            hmd_.updatePose(head, false);
-            leftController_.update(HandState{}, false);
-            rightController_.update(HandState{}, false);
-            havePose_ = false;
         }
         if (gotBody) {
             for (size_t i = 0; i < body.size(); ++i) bodyTrackers_[i]->update(body[i]);
             lastBody_ = now;
             haveBody_ = true;
-        } else if (haveBody_ && now - lastBody_ > std::chrono::milliseconds(300)) {
-            for (auto* tracker : bodyTrackers_) tracker->update(BodyTrackerState{});
-            haveBody_ = false;
         }
 
         if (hmd_.objectId() != vr::k_unTrackedDeviceIndexInvalid) {
@@ -616,6 +647,9 @@ private:
     std::chrono::steady_clock::time_point lastBody_{};
     bool havePose_ = false;
     bool haveBody_ = false;
+    kitvr::TrackingSequence poseSequence_;
+    kitvr::TrackingSequence bodySequence_;
+    std::array<bool, 2> invalidHandLogged_{};
 };
 
 Provider provider;

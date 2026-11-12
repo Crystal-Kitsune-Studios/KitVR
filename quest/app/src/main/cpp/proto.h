@@ -20,6 +20,7 @@ constexpr size_t kBodyTrackingLen = 16 + kBodyTrackingJointCount * 28;
 constexpr uint8_t kPacketVideo = 1;
 constexpr uint8_t kPacketTracking = 2;
 constexpr uint8_t kPacketBodyTracking = 5;
+constexpr uint8_t kPacketViewConfig = 6;
 constexpr uint8_t kPacketAudioDown = 3;  // PC audio to the headset
 constexpr uint8_t kPacketAudioUp = 4;    // microphone to the PC
 constexpr size_t kAudioHeaderLen = 16;
@@ -124,6 +125,20 @@ struct TrackingHand {
     float stickY = 0.0f;
     float pose[7] = {0, 0, 0, 0, 0, 0, 1};
 };
+
+struct EyeViewConfig {
+    float projection[4];
+    float eyeToHead[7];
+};
+
+inline std::vector<uint8_t> encodeViewConfig(const EyeViewConfig eyes[2]) {
+    std::vector<uint8_t> out{kPacketViewConfig, 1, 0, 0};
+    for (size_t i = 0; i < 2; ++i) {
+        for (float value : eyes[i].projection) putF32(out, value);
+        for (float value : eyes[i].eyeToHead) putF32(out, value);
+    }
+    return out;
+}
 
 struct Message {
     uint8_t tag = 0;

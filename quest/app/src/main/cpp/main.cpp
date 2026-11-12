@@ -26,6 +26,7 @@
 
 #include "log.h"
 #include "session.h"
+#include "hand_input.h"
 #include "wait_scene.h"
 
 #define CHECK(call)                                                           \
@@ -66,7 +67,6 @@ struct SystemPropertiesFullBodyMETACompat {
 struct HandActions {
     XrAction pose = XR_NULL_HANDLE;
     XrAction trigger = XR_NULL_HANDLE;
-    XrAction triggerClick = XR_NULL_HANDLE;
     XrAction squeeze = XR_NULL_HANDLE;
     XrAction thumbstick = XR_NULL_HANDLE;
     XrAction thumbstickClick = XR_NULL_HANDLE;
@@ -118,10 +118,15 @@ struct AppState {
 
     bool haveCfg = false;
     kitvr::StreamConfig cfg;
+    uint32_t cfgEpoch = 0;
+    uint32_t videoEpoch = 0;
 
     bool micRequested = false;
     bool waitMusicFaded = false;
+    bool headTrackingValid = false;
     uint64_t lastPermCheckUs = 0;
+    uint64_t lastViewConfigUs = 0;
+    uint64_t lastVideoTryUs = 0;
 
     kitvr::Session net;
     WaitScene waitScene;
@@ -266,6 +271,7 @@ bool createInstance(AppState& S) {
     if (handTrackingAvailable) exts.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
     const bool bodyTrackingAvailable = has(XR_FB_BODY_TRACKING_EXTENSION_NAME);
     if (bodyTrackingAvailable) exts.push_back(XR_FB_BODY_TRACKING_EXTENSION_NAME);
+    else LOGI("body tracking is not available on this OpenXR runtime");
     S.hasMetaFullBodyExtension = bodyTrackingAvailable && has(kMetaFullBodyExtensionName);
     if (S.hasMetaFullBodyExtension) exts.push_back(kMetaFullBodyExtensionName);
 
@@ -399,6 +405,7 @@ bool createBodyTracker(AppState& S) {
     if (XR_FAILED(xrGetSystemProperties(S.instance, S.systemId, &systemProperties)) ||
         !bodyProperties.supportsBodyTracking) {
         S.hasBodyTracking = false;
+        LOGW("body tracking is not supported by this headset");
         return true;
     }
 
@@ -447,7 +454,9 @@ bool createHandAction(AppState& S, size_t handIndex, const char* actionName,
                       XrActionType type, XrAction& action) {
     XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
     std::strncpy(info.actionName, actionName, XR_MAX_ACTION_NAME_SIZE - 1);
-    std::strncpy(info.localizedActionName, localizedName, XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    std::string handLocalizedName = std::string(handIndex == 0 ? "Left " : "Right ") + localizedName;
+    std::strncpy(info.localizedActionName, handLocalizedName.c_str(),
+                 XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
     info.actionType = type;
     info.countSubactionPaths = 1;
     info.subactionPaths = &S.handPaths[handIndex];
@@ -483,9 +492,6 @@ bool createActions(AppState& S) {
         actionName = std::string(hand) + "_trigger_value";
         CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Trigger",
                               XR_ACTION_TYPE_FLOAT_INPUT, actions.trigger));
-        actionName = std::string(hand) + "_trigger_click";
-        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Trigger click",
-                              XR_ACTION_TYPE_BOOLEAN_INPUT, actions.triggerClick));
         actionName = std::string(hand) + "_squeeze";
         CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Grip",
                               XR_ACTION_TYPE_FLOAT_INPUT, actions.squeeze));
@@ -507,7 +513,6 @@ bool createActions(AppState& S) {
 
         CHECK_BOOL(addBinding(S, actions.pose, (std::string(base) + "/input/grip/pose").c_str(), bindings));
         CHECK_BOOL(addBinding(S, actions.trigger, (std::string(base) + "/input/trigger/value").c_str(), bindings));
-        CHECK_BOOL(addBinding(S, actions.triggerClick, (std::string(base) + "/input/trigger/click").c_str(), bindings));
         CHECK_BOOL(addBinding(S, actions.squeeze, (std::string(base) + "/input/squeeze/value").c_str(), bindings));
         CHECK_BOOL(addBinding(S, actions.thumbstick, (std::string(base) + "/input/thumbstick").c_str(), bindings));
         CHECK_BOOL(addBinding(S, actions.thumbstickClick, (std::string(base) + "/input/thumbstick/click").c_str(), bindings));
@@ -553,7 +558,7 @@ bool actionBoolean(AppState& S, XrAction action, XrPath hand) {
            state.isActive && state.currentState;
 }
 
-kitvr::TrackingHand readHand(AppState& S, size_t index, XrTime displayTime) {
+kitvr::TrackingHand readControllerHand(AppState& S, size_t index, XrTime displayTime) {
     kitvr::TrackingHand hand{};
     const XrPath path = S.handPaths[index];
     const auto& actions = S.handActions[index];
@@ -594,14 +599,19 @@ kitvr::TrackingHand readHand(AppState& S, size_t index, XrTime displayTime) {
         hand.stickX = vectorState.currentState.x;
         hand.stickY = vectorState.currentState.y;
     }
-    if (actionBoolean(S, actions.triggerClick, path)) hand.buttons |= 1u << 0;
+    if (hand.trigger > 0.5f) hand.buttons |= 1u << 0;
     if (hand.grip > 0.5f) hand.buttons |= 1u << 1;
     if (actionBoolean(S, actions.primary, path)) hand.buttons |= 1u << 2;
     if (actionBoolean(S, actions.secondary, path)) hand.buttons |= 1u << 3;
     if (actionBoolean(S, actions.menu, path)) hand.buttons |= 1u << 4;
     if (actionBoolean(S, actions.thumbstickClick, path)) hand.buttons |= 1u << 5;
 
-    if (!hand.active && S.hasHandTracking && S.handTrackers[index] != XR_NULL_HANDLE) {
+    return hand;
+}
+
+kitvr::TrackingHand readTrackedHand(AppState& S, size_t index, XrTime displayTime) {
+    kitvr::TrackingHand hand{};
+    if (S.hasHandTracking && S.handTrackers[index] != XR_NULL_HANDLE) {
         std::array<XrHandJointLocationEXT, XR_HAND_JOINT_COUNT_EXT> joints{};
         XrHandJointLocationsEXT locations{XR_TYPE_HAND_JOINT_LOCATIONS_EXT};
         locations.jointCount = static_cast<uint32_t>(joints.size());
@@ -611,46 +621,22 @@ kitvr::TrackingHand readHand(AppState& S, size_t index, XrTime displayTime) {
         locate.time = displayTime;
         if (XR_SUCCEEDED(S.locateHandJoints(S.handTrackers[index], &locate, &locations)) &&
             locations.isActive) {
-            const auto& palm = joints[XR_HAND_JOINT_PALM_EXT];
-            const auto& thumbTip = joints[XR_HAND_JOINT_THUMB_TIP_EXT];
-            const auto& indexTip = joints[XR_HAND_JOINT_INDEX_TIP_EXT];
-            const XrSpaceLocationFlags required = XR_SPACE_LOCATION_POSITION_VALID_BIT |
-                                                  XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-            if ((palm.locationFlags & required) == required &&
-                (thumbTip.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
-                (indexTip.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
-                hand.active = true;
-                hand.pose[0] = palm.pose.position.x;
-                hand.pose[1] = palm.pose.position.y;
-                hand.pose[2] = palm.pose.position.z;
-                hand.pose[3] = palm.pose.orientation.x;
-                hand.pose[4] = palm.pose.orientation.y;
-                hand.pose[5] = palm.pose.orientation.z;
-                hand.pose[6] = palm.pose.orientation.w;
-                const float dx = thumbTip.pose.position.x - indexTip.pose.position.x;
-                const float dy = thumbTip.pose.position.y - indexTip.pose.position.y;
-                const float dz = thumbTip.pose.position.z - indexTip.pose.position.z;
-                const float pinch = std::sqrt(dx * dx + dy * dy + dz * dz);
-                hand.trigger = std::clamp((0.045f - pinch) / 0.03f, 0.0f, 1.0f);
-                constexpr XrHandJointEXT fingerTips[] = {
-                    XR_HAND_JOINT_INDEX_TIP_EXT,
-                    XR_HAND_JOINT_MIDDLE_TIP_EXT,
-                    XR_HAND_JOINT_RING_TIP_EXT,
-                    XR_HAND_JOINT_LITTLE_TIP_EXT,
-                };
-                float averageCurl = 0.0f;
-                for (XrHandJointEXT tip : fingerTips) {
-                    const auto& location = joints[tip];
-                    const float x = location.pose.position.x - palm.pose.position.x;
-                    const float y = location.pose.position.y - palm.pose.position.y;
-                    const float z = location.pose.position.z - palm.pose.position.z;
-                    averageCurl += std::sqrt(x * x + y * y + z * z) /
-                                   static_cast<float>(std::size(fingerTips));
-                }
-                hand.grip = std::clamp((0.105f - averageCurl) / 0.065f, 0.0f, 1.0f);
-                if (hand.trigger > 0.75f) hand.buttons |= (1u << 0) | (1u << 2);
-                if (hand.grip > 0.75f) hand.buttons |= 1u << 1;
+            constexpr XrHandJointEXT sourceJoints[] = {
+                XR_HAND_JOINT_PALM_EXT, XR_HAND_JOINT_THUMB_TIP_EXT,
+                XR_HAND_JOINT_INDEX_TIP_EXT, XR_HAND_JOINT_MIDDLE_TIP_EXT,
+                XR_HAND_JOINT_RING_TIP_EXT, XR_HAND_JOINT_LITTLE_TIP_EXT,
+            };
+            static_assert(std::size(sourceJoints) == kitvr::HandJointCount);
+            std::array<kitvr::HandJoint, kitvr::HandJointCount> sample{};
+            for (size_t i = 0; i < sample.size(); ++i) {
+                const auto& joint = joints[sourceJoints[i]];
+                sample[i].positionValid = (joint.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+                sample[i].orientationValid = (joint.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0;
+                sample[i].position = {joint.pose.position.x, joint.pose.position.y, joint.pose.position.z};
+                sample[i].orientation = {joint.pose.orientation.x, joint.pose.orientation.y,
+                                         joint.pose.orientation.z, joint.pose.orientation.w};
             }
+            hand = kitvr::trackedHandFromJoints(sample);
         }
     }
     return hand;
@@ -720,8 +706,14 @@ bool setupVideo(AppState& S) {
     CHECK(S.createSurfaceSwapchain(S.session, &sc, &S.videoSwapchain, &surface));
 
     JNIEnv* env = nullptr;
-    S.app->activity->vm->AttachCurrentThread(&env, nullptr);
+    if (S.app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) {
+        LOGE("cannot attach thread to obtain video surface");
+        xrDestroySwapchain(S.videoSwapchain);
+        S.videoSwapchain = XR_NULL_HANDLE;
+        return false;
+    }
     S.videoWindow = ANativeWindow_fromSurface(env, surface);
+    if (surface && env->GetObjectRefType(surface) == JNILocalRefType) env->DeleteLocalRef(surface);
     if (!S.videoWindow) {
         LOGE("ANativeWindow_fromSurface failed");
         xrDestroySwapchain(S.videoSwapchain);
@@ -742,6 +734,7 @@ bool setupVideo(AppState& S) {
 // Must run before xrEndSession: nothing may write to the surface once the session stops.
 void teardownVideo(AppState& S) {
     S.net.stopMedia();
+    S.headTrackingValid = false;
     if (S.videoSwapchain != XR_NULL_HANDLE) {
         xrDestroySwapchain(S.videoSwapchain);
         S.videoSwapchain = XR_NULL_HANDLE;
@@ -791,21 +784,51 @@ void pollXrEvents(AppState& S) {
 }
 
 void maintainVideo(AppState& S) {
+    const uint32_t epoch = S.net.controlEpoch();
+    if (!S.net.controlReady() ||
+        (S.videoSwapchain != XR_NULL_HANDLE && S.videoEpoch != epoch)) {
+        if (S.videoSwapchain != XR_NULL_HANDLE) teardownVideo(S);
+        S.haveCfg = false;
+        S.lastVideoTryUs = 0;
+        return;
+    }
+
+    if (S.haveCfg && S.cfgEpoch != epoch) S.haveCfg = false;
     kitvr::StreamConfig c;
-    if (S.net.takeConfig(c)) {
+    uint32_t cfgEpoch = 0;
+    if (S.net.takeConfig(c, cfgEpoch)) {
+        if (!S.net.controlReady() || cfgEpoch != S.net.controlEpoch()) return;
         bool changed = !S.haveCfg || c.codec != S.cfg.codec || c.width != S.cfg.width ||
                        c.height != S.cfg.height || c.fps != S.cfg.fps ||
                        c.stereoSbs != S.cfg.stereoSbs;
         if (changed) {
-            if (S.videoSwapchain != XR_NULL_HANDLE) teardownVideo(S);
+            if (S.videoSwapchain != XR_NULL_HANDLE) {
+                teardownVideo(S);
+                S.haveCfg = false;
+                S.lastVideoTryUs = 0;
+                return;
+            }
             S.cfg = c;
             S.haveCfg = true;
+            S.lastVideoTryUs = 0;
         }
+        S.cfgEpoch = cfgEpoch;
     }
     bool visible = S.state == XR_SESSION_STATE_VISIBLE || S.state == XR_SESSION_STATE_FOCUSED;
-    if (S.sessionBegun && visible && S.haveCfg && S.videoSwapchain == XR_NULL_HANDLE) {
-        if (!setupVideo(S)) {
-            S.haveCfg = false;  // wait for the server to send the config again
+    if (S.sessionBegun && visible && S.haveCfg && S.net.controlReady() &&
+        S.cfgEpoch == S.net.controlEpoch() && S.videoSwapchain == XR_NULL_HANDLE) {
+        const uint64_t now = kitvr::nowUs();
+        if (S.lastVideoTryUs == 0 || now - S.lastVideoTryUs >= 1000000) {
+            S.lastVideoTryUs = now;
+            if (!setupVideo(S)) {
+                LOGW("video setup failed; retrying");
+            } else {
+                S.videoEpoch = S.cfgEpoch;
+                if (!S.net.controlReady() || S.videoEpoch != S.net.controlEpoch()) {
+                    teardownVideo(S);
+                    S.haveCfg = false;
+                }
+            }
         }
     }
 }
@@ -835,8 +858,10 @@ void renderFrame(AppState& S) {
         float head[7] = {0, 0, 0, 0, 0, 0, 1};
         XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
         const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-        if (XR_SUCCEEDED(xrLocateSpace(S.viewSpace, S.localSpace, fs.predictedDisplayTime, &loc)) &&
-            (loc.locationFlags & need) == need) {
+        const bool headValid =
+            XR_SUCCEEDED(xrLocateSpace(S.viewSpace, S.localSpace, fs.predictedDisplayTime, &loc)) &&
+            (loc.locationFlags & need) == need;
+        if (headValid) {
             head[0] = loc.pose.position.x;
             head[1] = loc.pose.position.y;
             head[2] = loc.pose.position.z;
@@ -845,20 +870,53 @@ void renderFrame(AppState& S) {
             head[5] = loc.pose.orientation.z;
             head[6] = loc.pose.orientation.w;
         }
-        kitvr::TrackingHand left;
-        kitvr::TrackingHand right;
+        if (headValid != S.headTrackingValid) {
+            if (headValid) LOGI("head tracking available");
+            else LOGW("head tracking lost; suspending tracking updates");
+            S.headTrackingValid = headValid;
+        }
+        bool actionsSynchronized = false;
         if (S.hasHandActions) {
             XrActiveActionSet activeSet{};
             activeSet.actionSet = S.actionSet;
             XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
             syncInfo.countActiveActionSets = 1;
             syncInfo.activeActionSets = &activeSet;
-            if (XR_SUCCEEDED(xrSyncActions(S.session, &syncInfo))) {
-                left = readHand(S, 0, fs.predictedDisplayTime);
-                right = readHand(S, 1, fs.predictedDisplayTime);
+            actionsSynchronized = xrSyncActions(S.session, &syncInfo) == XR_SUCCESS;
+        }
+        const auto readHand = [&](size_t index) {
+            return kitvr::readPreferredHand(actionsSynchronized,
+                [&] { return readControllerHand(S, index, fs.predictedDisplayTime); },
+                [&] { return readTrackedHand(S, index, fs.predictedDisplayTime); });
+        };
+        const auto left = readHand(0);
+        const auto right = readHand(1);
+        if (headValid) S.net.sendTracking(kitvr::nowUs(), head, left, right);
+        const uint64_t now = kitvr::nowUs();
+        if (now - S.lastViewConfigUs >= 1000000) {
+            XrViewLocateInfo viewInfo{XR_TYPE_VIEW_LOCATE_INFO};
+            viewInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+            viewInfo.displayTime = fs.predictedDisplayTime;
+            viewInfo.space = S.viewSpace;
+            XrViewState viewState{XR_TYPE_VIEW_STATE};
+            XrView views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+            uint32_t count = 0;
+            const auto viewFlags = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
+            if (XR_SUCCEEDED(xrLocateViews(S.session, &viewInfo, &viewState, 2, &count, views)) &&
+                count == 2 && (viewState.viewStateFlags & viewFlags) == viewFlags) {
+                kitvr::EyeViewConfig eyes[2]{};
+                for (size_t i = 0; i < 2; ++i) {
+                    const auto& view = views[i];
+                    eyes[i] = {{std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
+                                -std::tan(view.fov.angleUp), -std::tan(view.fov.angleDown)},
+                               {view.pose.position.x, view.pose.position.y, view.pose.position.z,
+                                view.pose.orientation.x, view.pose.orientation.y,
+                                view.pose.orientation.z, view.pose.orientation.w}};
+                }
+                S.net.sendViewConfig(eyes);
+                S.lastViewConfigUs = now;
             }
         }
-        S.net.sendTracking(kitvr::nowUs(), head, left, right);
         if (S.hasBodyTracking) {
             float bodyJoints[kitvr::kBodyTrackingJointCount][7]{};
             for (auto& joint : bodyJoints) joint[6] = 1.0f;
@@ -873,7 +931,9 @@ void renderFrame(AppState& S) {
     XrCompositionLayerQuad rightQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
     const XrCompositionLayerBaseHeader* layers[2] = {nullptr, nullptr};
     uint32_t layerCount = 0;
-    if (fs.shouldRender && (!S.net.mediaRunning() || !S.net.videoHasRenderedFrame())) {
+    if (fs.shouldRender &&
+        (!S.net.controlReady() || S.videoEpoch != S.net.controlEpoch() ||
+         !S.net.mediaRunning() || !S.net.videoHasRenderedFrame())) {
         const auto* waiting = S.waitScene.render(S.session, S.viewSpace, fs.predictedDisplayTime);
         if (waiting) layers[layerCount++] = waiting;
     } else if (fs.shouldRender && S.videoSwapchain != XR_NULL_HANDLE && S.cfg.height > 0) {

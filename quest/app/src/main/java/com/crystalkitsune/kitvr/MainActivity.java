@@ -1,6 +1,7 @@
 package com.crystalkitsune.kitvr;
 
 import android.app.Activity;
+import android.app.ActivityOptions;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
@@ -20,6 +21,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
+import android.view.Display;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -468,7 +470,12 @@ public final class MainActivity extends Activity {
         Intent intent = new Intent(this, KitVrActivity.class);
         intent.putExtra("host", host);
         intent.putExtra("waiting_music", getPreferences(MODE_PRIVATE).getBoolean("waiting_music", true));
-        startActivity(intent);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        ActivityOptions options = ActivityOptions.makeBasic();
+        options.setLaunchDisplayId(Display.DEFAULT_DISPLAY);
+        getBaseContext().startActivity(intent, options.toBundle());
+        finish();
     }
 
     @Override

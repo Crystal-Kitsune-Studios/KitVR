@@ -59,11 +59,14 @@ bool VideoDecoder::start(ANativeWindow* window, const char* mime, int width, int
 bool VideoDecoder::submit(std::vector<uint8_t>&& data, bool keyframe, int64_t ptsUs) {
     if (!running_) return false;
     std::lock_guard<std::mutex> lk(m_);
+    if (recoveryNeeded_ && !keyframe) return false;
     if (queue_.size() >= kMaxQueue) {
         queue_.clear();
+        recoveryNeeded_ = true;
         LOGW("decoder queue overflow, dropping frames");
         return false;
     }
+    if (keyframe) recoveryNeeded_ = false;
     queue_.push_back(Au{std::move(data), keyframe, ptsUs});
     cv_.notify_one();
     return true;
@@ -86,11 +89,18 @@ void VideoDecoder::loop() {
             if (idx >= 0) {
                 size_t cap = 0;
                 uint8_t* buf = AMediaCodec_getInputBuffer(codec_, static_cast<size_t>(idx), &cap);
-                size_t n = std::min(cap, cur->data.size());
-                if (buf) std::memcpy(buf, cur->data.data(), n);
-                AMediaCodec_queueInputBuffer(codec_, static_cast<size_t>(idx), 0, n,
-                                             static_cast<uint64_t>(cur->pts),
-                                             cur->key ? kBufferFlagKeyFrame : 0);
+                const bool valid = buf && cur->data.size() <= cap;
+                if (valid) std::memcpy(buf, cur->data.data(), cur->data.size());
+                const media_status_t status = AMediaCodec_queueInputBuffer(
+                    codec_, static_cast<size_t>(idx), 0, valid ? cur->data.size() : 0,
+                    static_cast<uint64_t>(cur->pts), valid && cur->key ? kBufferFlagKeyFrame : 0);
+                if (!valid || status != AMEDIA_OK) {
+                    LOGW("decoder input failed or was too small (%zu bytes, capacity %zu, status %d)",
+                         cur->data.size(), cap, static_cast<int>(status));
+                    std::lock_guard<std::mutex> lk(m_);
+                    queue_.clear();
+                    recoveryNeeded_ = true;
+                }
                 cur.reset();
             }
         }
@@ -100,8 +110,13 @@ void VideoDecoder::loop() {
             AMediaCodecBufferInfo info;
             ssize_t o = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
             if (o >= 0) {
-                AMediaCodec_releaseOutputBuffer(codec_, static_cast<size_t>(o), true);
-                if (info.size > 0) firstFrameRendered_ = true;
+                const media_status_t status =
+                    AMediaCodec_releaseOutputBuffer(codec_, static_cast<size_t>(o), true);
+                if (status != AMEDIA_OK) {
+                    LOGE("decoder output release failed: %d", static_cast<int>(status));
+                } else if (info.size > 0) {
+                    firstFrameRendered_ = true;
+                }
                 continue;
             }
             if (o == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED ||
@@ -129,6 +144,7 @@ void VideoDecoder::stop() {
     }
     std::lock_guard<std::mutex> lk(m_);
     queue_.clear();
+    recoveryNeeded_ = false;
 }
 
 }  // namespace kitvr

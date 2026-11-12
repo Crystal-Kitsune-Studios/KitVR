@@ -63,6 +63,7 @@ struct KitVrApp {
     audio_enabled: bool,
     audio_device: String,
     microphone_device: String,
+    mouse_enabled: bool,
     audio_devices: Vec<String>,
     child: Option<Child>,
     log_tx: Sender<String>,
@@ -183,6 +184,7 @@ impl KitVrApp {
             audio_enabled: settings.audio_enabled,
             audio_device: settings.audio_device,
             microphone_device: settings.microphone_device,
+            mouse_enabled: false,
             audio_devices: Vec::new(),
             child: None,
             log_tx,
@@ -261,6 +263,9 @@ impl KitVrApp {
                 self.microphone_device.trim().to_string(),
             ]);
         }
+        if self.mouse_enabled {
+            args.push("--enable-mouse".to_string());
+        }
 
         match Command::new(&executable)
             .args(&args)
@@ -274,7 +279,7 @@ impl KitVrApp {
                     executable.display(),
                     args.join(" ")
                 ));
-                self.status = format!("Server running. Enter {} in the Quest app.", self.host_ip);
+                self.status = "Server starting. On Wayland, approve the screen-sharing dialog.".to_string();
                 if let Some(stdout) = child.stdout.take() {
                     pipe_logs(stdout, self.log_tx.clone());
                 }
@@ -337,6 +342,9 @@ impl KitVrApp {
 
     fn update_server(&mut self) {
         while let Ok(line) = self.log_rx.try_recv() {
+            if line.starts_with("listening: control TCP ") {
+                self.status = format!("Server running. Enter {} in the Quest app.", self.host_ip);
+            }
             self.push_log(line);
         }
         let exited = match self.child.as_mut() {
@@ -643,7 +651,11 @@ impl KitVrApp {
             ui.allocate_ui_with_layout(
                 egui::vec2(left_width, available.y),
                 Layout::top_down(Align::Min),
-                |ui| self.stream_card(ui, available.y),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.stream_card(ui, available.y));
+                },
             );
             ui.add_space(gap);
             ui.allocate_ui_with_layout(
@@ -837,6 +849,15 @@ impl KitVrApp {
                         );
                     });
                     self.microphone_device = microphone;
+                    ui.add_space(12.0);
+                    section_label(ui, "Mouse control");
+                    ui.add_space(6.0);
+                    option_row(
+                        ui,
+                        "Enable hand/controller mouse",
+                        "Right hand moves; trigger or pinch clicks, grip right-clicks. Trusted networks only: connections are unauthenticated.",
+                        &mut self.mouse_enabled,
+                    );
                 });
 
                 ui.add_space(14.0);
@@ -872,7 +893,7 @@ impl KitVrApp {
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new(
-                        "Desktop capture uses gdigrab on Windows and x11grab on Linux (X11 or XWayland only). Wayland native capture is not implemented yet.",
+                        "Desktop capture uses gdigrab on Windows, x11grab on X11, and screen sharing via PipeWire and GStreamer on Wayland. On Wayland, choose a screen or window in the sharing dialog.",
                     )
                     .size(11.5)
                     .color(DIM),
@@ -945,7 +966,7 @@ impl KitVrApp {
                 for line in [
                     "About one extra frame of latency",
                     "Fixed GOP, keyframe requests are not honored",
-                    "No input injection yet",
+                    "Mouse control is opt-in and unauthenticated",
                     "Audio is raw PCM, not compressed",
                 ] {
                     ui.label(RichText::new(format!("- {line}")).size(11.5).color(MUTED));
@@ -1391,6 +1412,7 @@ mod tests {
             audio_enabled: settings.audio_enabled,
             audio_device: settings.audio_device,
             microphone_device: settings.microphone_device,
+            mouse_enabled: false,
             audio_devices: Vec::new(),
             child: None,
             log_tx,

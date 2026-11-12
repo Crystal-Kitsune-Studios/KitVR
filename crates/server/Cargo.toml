@@ -7,7 +7,13 @@ edition.workspace = true
 kitvr-core = { path = "../core" }
 mdns-sd = "0.21"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.14", features = ["screencast", "remote_desktop"] }
+libc = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
 # Windows audio (WASAPI, including loopback and virtual devices such as Voicemeeter).
 # Linux uses parec and pacat from pulseaudio-utils instead, so it needs no crate.
 [target.'cfg(windows)'.dependencies]
 cpal = "0.15"
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }

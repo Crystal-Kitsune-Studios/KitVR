@@ -23,8 +23,7 @@ public:
 
     bool start(ANativeWindow* window, const char* mime, int width, int height, int fps);
 
-    // Queues one access unit. Returns false if the queue overflowed and was cleared;
-    // the caller must then wait for the next keyframe because references are broken.
+    // Returns false if references are broken and the caller must wait for a keyframe.
     bool submit(std::vector<uint8_t>&& data, bool keyframe, int64_t ptsUs);
     bool hasRenderedFrame() const { return firstFrameRendered_.load(); }
 
@@ -46,6 +45,7 @@ private:
     std::mutex m_;
     std::condition_variable cv_;
     std::deque<Au> queue_;
+    bool recoveryNeeded_ = false;
 };
 
 }  // namespace kitvr

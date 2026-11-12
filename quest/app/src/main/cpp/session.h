@@ -26,7 +26,9 @@ public:
     void startControl(const std::string& host);
 
     // True once for each StreamConfig received from the server.
-    bool takeConfig(StreamConfig& out);
+    bool takeConfig(StreamConfig& out, uint32_t& epoch);
+    bool controlReady() const { return controlReady_; }
+    uint32_t controlEpoch() const { return epoch_; }
 
     // Starts the UDP receiver and the decoder, which renders into `window`.
     bool startMedia(const StreamConfig& cfg, ANativeWindow* window);
@@ -39,6 +41,7 @@ public:
                       const TrackingHand& right);
     void sendBodyTracking(uint64_t tsUs, uint16_t activeMask,
                           const float joints[kBodyTrackingJointCount][7]);
+    void sendViewConfig(const EyeViewConfig eyes[2]);
 
     // Call once per frame from the main thread. Starts audio streams when they are due.
     void tick();
@@ -56,12 +59,18 @@ private:
 
     std::string host_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> controlReady_{false};
     std::thread controlThread_;
     std::mutex sendMutex_;
     int controlFd_ = -1;  // guarded by sendMutex_
+    bool controlStopping_ = false;  // guarded by sendMutex_
 
     std::mutex cfgMutex_;
-    std::optional<StreamConfig> pendingCfg_;
+    struct PendingConfig {
+        StreamConfig config;
+        uint32_t epoch;
+    };
+    std::optional<PendingConfig> pendingCfg_;
     std::optional<AudioConfig> audioCfg_;
     std::atomic<uint32_t> epoch_{0};  // bumped on every new control session
 

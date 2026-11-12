@@ -1,6 +1,8 @@
 # KitVR SteamVR driver prototype
 
-This experimental driver registers the Quest as a SteamVR HMD with left/right controllers and forwards head, grip-pose, and basic controller input from the KitVR server over loopback UDP port 9945. When Meta full-body tracking is available, it also registers waist, chest, knee, and foot generic trackers; assign their roles in SteamVR's tracker management UI.
+This experimental driver registers the Quest as a SteamVR HMD with left/right controllers and forwards head, grip-pose, basic controller input, and per-eye view geometry from the KitVR server over loopback UDP port 9945. When Meta full-body tracking is available, it also registers waist, chest, knee, and foot generic trackers; assign their roles in SteamVR's tracker management UI.
+
+The controller profile supplies default legacy-game and SteamVR dashboard bindings. The dashboard bindings map the trigger or pinch to select, the primary button or grip to right-click, the joystick to scroll, and the left menu button to the dashboard.
 
 ## Install
 

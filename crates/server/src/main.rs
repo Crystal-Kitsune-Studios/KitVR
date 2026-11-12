@@ -1,19 +1,26 @@
 mod audio;
 mod bridge;
+#[cfg(any(target_os = "linux", windows))]
+mod mouse;
 mod platform;
+#[cfg(target_os = "linux")]
+mod wayland;
 
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+#[cfg(any(target_os = "linux", windows))]
+use std::time::Instant;
 
 use kitvr_core::proto::audio::{pcm_from_payload, AudioHeader, PACKET_TYPE_AUDIO_UP};
 use kitvr_core::proto::control::{decode_message, encode_message, Codec, Message};
 use kitvr_core::proto::tracking::{
-    BodyTracking, Tracking, PACKET_TYPE_BODY_TRACKING, PACKET_TYPE_TRACKING,
+    BodyTracking, Tracking, ViewConfig, PACKET_TYPE_BODY_TRACKING, PACKET_TYPE_TRACKING,
+    PACKET_TYPE_VIEW_CONFIG,
 };
 use kitvr_core::proto::{DecodeError, CONTROL_PORT, MEDIA_PORT, PROTOCOL_VERSION};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -39,12 +46,45 @@ Audio:
                                a Voicemeeter virtual input (default: microphone off)
   --no-audio                   disable all audio
 
+Input:
+  --enable-mouse               allow the right hand/controller to control the PC mouse.
+                               Only use on a trusted network: connections are not authenticated.
+
 Requires ffmpeg on PATH, or set KITVR_FFMPEG to its full path.
+Wayland desktop capture also requires a ScreenCast portal, PipeWire, and GStreamer
+with gst-launch-1.0 and the pipewiresrc, videoconvert, videoscale, videorate, queue and fdsink plugins.
 ";
 
-fn parse_args() -> (bridge::Settings, audio::AudioSettings) {
+fn parse_number(option: &str, value: &str) -> Result<u32, String> {
+    value.parse().map_err(|_| format!("{option} requires an unsigned integer"))
+}
+
+fn validate_settings(settings: &bridge::Settings) -> Result<(), &'static str> {
+    if settings.width < 2 || settings.width > u16::MAX as u32 || settings.width % 2 != 0 {
+        return Err("--width must be even and between 2 and 65534");
+    }
+    if settings.height < 2 || settings.height > u16::MAX as u32 || settings.height % 2 != 0 {
+        return Err("--height must be even and between 2 and 65534");
+    }
+    if settings.fps == 0 || settings.fps > u16::MAX as u32 {
+        return Err("--fps must be between 1 and 65535");
+    }
+    if settings.bitrate_kbps == 0 {
+        return Err("--bitrate-kbps must be greater than zero");
+    }
+    if settings.gop == 0 {
+        return Err("--gop must be greater than zero");
+    }
+    if settings.stereo_sbs && !matches!(&settings.source, bridge::Source::File(_)) {
+        return Err("--stereo-sbs requires --source file:<path> with side-by-side video");
+    }
+    Ok(())
+}
+
+fn parse_args() -> (bridge::Settings, audio::AudioSettings, bool) {
     let mut s = bridge::Settings::default();
     let mut a = audio::AudioSettings::default();
+    let mut mouse_enabled = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut next = || args.next().unwrap_or_default();
@@ -64,11 +104,20 @@ fn parse_args() -> (bridge::Settings, audio::AudioSettings) {
                 };
             }
             "--encoder" => s.encoder = next(),
-            "--width" => s.width = next().parse().unwrap_or(s.width),
-            "--height" => s.height = next().parse().unwrap_or(s.height),
-            "--fps" => s.fps = next().parse().unwrap_or(s.fps),
-            "--bitrate-kbps" => s.bitrate_kbps = next().parse().unwrap_or(s.bitrate_kbps),
-            "--gop" => s.gop = next().parse().unwrap_or(s.gop),
+            "--width" | "--height" | "--fps" | "--bitrate-kbps" | "--gop" => {
+                let value = parse_number(&arg, &next()).unwrap_or_else(|error| {
+                    eprintln!("{error}\n{USAGE}");
+                    std::process::exit(2);
+                });
+                match arg.as_str() {
+                    "--width" => s.width = value,
+                    "--height" => s.height = value,
+                    "--fps" => s.fps = value,
+                    "--bitrate-kbps" => s.bitrate_kbps = value,
+                    "--gop" => s.gop = value,
+                    _ => unreachable!(),
+                }
+            }
             "--stereo-sbs" => s.stereo_sbs = true,
             "--audio-device" => a.capture = Some(next()),
             "--mic-device" => a.mic_output = Some(next()),
@@ -76,6 +125,7 @@ fn parse_args() -> (bridge::Settings, audio::AudioSettings) {
                 a.capture = None;
                 a.mic_output = None;
             }
+            "--enable-mouse" => mouse_enabled = true,
             "--list-audio" => {
                 for line in audio::list_devices() {
                     println!("{line}");
@@ -92,15 +142,11 @@ fn parse_args() -> (bridge::Settings, audio::AudioSettings) {
             }
         }
     }
-    if s.stereo_sbs && !matches!(&s.source, bridge::Source::File(_)) {
-        eprintln!("--stereo-sbs requires --source file:<path> with side-by-side video\n{USAGE}");
+    if let Err(error) = validate_settings(&s) {
+        eprintln!("{error}\n{USAGE}");
         std::process::exit(2);
     }
-    if s.stereo_sbs && (s.width < 2 || s.width % 2 != 0 || s.width > u16::MAX as u32) {
-        eprintln!("--stereo-sbs requires an even total --width between 2 and 65535\n{USAGE}");
-        std::process::exit(2);
-    }
-    (s, a)
+    (s, a, mouse_enabled)
 }
 
 fn host_name() -> String {
@@ -162,32 +208,82 @@ fn wait_client(stop: &AtomicBool, client: &Mutex<Option<SocketAddr>>) -> Option<
     }
 }
 
+fn media_socket(control: &TcpStream, port: u16) -> io::Result<UdpSocket> {
+    let local = SocketAddr::new(control.local_addr()?.ip(), port);
+    let socket = UdpSocket::bind(local)?;
+    socket.set_read_timeout(Some(Duration::from_millis(200)))?;
+    Ok(socket)
+}
+
 fn handle_control(
     mut s: TcpStream,
     settings: &bridge::Settings,
     audio_cfg: &audio::AudioSettings,
     udp: &Arc<UdpSocket>,
+    #[cfg(any(target_os = "linux", windows))] mouse: Option<Arc<mouse::Mouse>>,
 ) -> io::Result<()> {
+    let peer_ip = s.peer_addr()?.ip();
     let stop = Arc::new(AtomicBool::new(false));
     let client: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
-    let pose_ts = Arc::new(AtomicU64::new(0));
     let mut workers = Vec::new();
     let (mic_tx, mic_rx) = sync_channel::<Vec<i16>>(256);
     let mic_enabled = audio_cfg.mic_output.is_some();
 
     // Receives tracking and microphone packets, and learns where to send video.
     {
-        let (udp, stop, client, pose_ts) = (udp.clone(), stop.clone(), client.clone(), pose_ts.clone());
+        let (udp, stop, client) = (udp.clone(), stop.clone(), client.clone());
+        #[cfg(any(target_os = "linux", windows))]
+        let mouse_backend = mouse;
         workers.push(thread::spawn(move || {
             let mut buf = [0u8; 2048];
+            #[cfg(any(target_os = "linux", windows))]
+            let mut mouse = mouse_backend.as_deref().map(mouse::Mouse::session);
+            #[cfg(any(target_os = "linux", windows))]
+            let mut last_tracking = None::<Instant>;
             while !stop.load(Ordering::Relaxed) {
-                let Ok((n, from)) = udp.recv_from(&mut buf) else { continue };
+                #[cfg(any(target_os = "linux", windows))]
+                if last_tracking.is_some_and(|last| last.elapsed() > Duration::from_millis(350)) {
+                    if let Some(input) = mouse.as_mut() {
+                        if let Err(error) = input.reset() {
+                            eprintln!("mouse control stopped: {error}");
+                            mouse = None;
+                        }
+                    }
+                    last_tracking = None;
+                }
+                let (n, from) = match udp.recv_from(&mut buf) {
+                    Ok(packet) => packet,
+                    Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => continue,
+                    Err(error) => {
+                        eprintln!("media receive failed: {error}");
+                        break;
+                    }
+                };
                 if n == 0 {
+                    continue;
+                }
+                if from.ip() != peer_ip {
+                    continue;
+                }
+                let known_client = *client.lock().unwrap();
+                if known_client.is_some_and(|address| address != from) {
                     continue;
                 }
                 if buf[0] == PACKET_TYPE_TRACKING {
                     if let Ok(t) = Tracking::parse(&buf[..n]) {
-                        pose_ts.store(t.timestamp_us, Ordering::Relaxed);
+                        #[cfg(any(target_os = "linux", windows))]
+                        {
+                            if let Some(input) = mouse.as_mut() {
+                                match input.update(&t) {
+                                    Ok(true) => last_tracking = Some(Instant::now()),
+                                    Ok(false) => {}
+                                    Err(error) => {
+                                        eprintln!("mouse control stopped: {error}");
+                                        mouse = None;
+                                    }
+                                }
+                            }
+                        }
                         let _ = udp.send_to(&buf[..n], ("127.0.0.1", STEAMVR_TRACKING_PORT));
                         let mut c = client.lock().unwrap();
                         if *c != Some(from) {
@@ -197,6 +293,10 @@ fn handle_control(
                     }
                 } else if buf[0] == PACKET_TYPE_BODY_TRACKING {
                     if BodyTracking::parse(&buf[..n]).is_ok() {
+                        let _ = udp.send_to(&buf[..n], ("127.0.0.1", STEAMVR_TRACKING_PORT));
+                    }
+                } else if buf[0] == PACKET_TYPE_VIEW_CONFIG {
+                    if known_client == Some(from) && ViewConfig::parse(&buf[..n]).is_ok() {
                         let _ = udp.send_to(&buf[..n], ("127.0.0.1", STEAMVR_TRACKING_PORT));
                     }
                 } else if buf[0] == PACKET_TYPE_AUDIO_UP && mic_enabled {
@@ -210,13 +310,15 @@ fn handle_control(
 
     // Video.
     {
-        let (udp, stop, client, pose_ts) = (udp.clone(), stop.clone(), client.clone(), pose_ts.clone());
+        let control = s.try_clone()?;
+        let (udp, stop, client) = (udp.clone(), stop.clone(), client.clone());
         let settings = settings.clone();
         workers.push(thread::spawn(move || {
             let Some(dest) = wait_client(&stop, &client) else { return };
             println!("streaming video to {dest}");
-            if let Err(e) = bridge::run(&settings, &udp, dest, &stop, &pose_ts) {
+            if let Err(e) = bridge::run(&settings, &udp, dest, &stop) {
                 eprintln!("video stopped: {e}");
+                let _ = control.shutdown(Shutdown::Both);
             }
         }));
     }
@@ -319,7 +421,22 @@ fn handle_control(
 }
 
 fn main() -> io::Result<()> {
-    let (settings, audio_cfg) = parse_args();
+    let (mut settings, audio_cfg, mouse_enabled) = parse_args();
+    #[cfg(target_os = "linux")]
+    if matches!(settings.source, bridge::Source::Desktop) && bridge::is_wayland_session() {
+        settings.source = bridge::Source::Wayland(Arc::new(wayland::WaylandCapture::new()?));
+    }
+    #[cfg(any(target_os = "linux", windows))]
+    let mouse = if mouse_enabled {
+        eprintln!("Warning: mouse control is enabled; KitVR connections are not authenticated. Use only a trusted network.");
+        Some(Arc::new(mouse::Mouse::new()?))
+    } else {
+        None
+    };
+    #[cfg(not(any(target_os = "linux", windows)))]
+    if mouse_enabled {
+        return Err(io::Error::other("mouse control is unsupported on this platform"));
+    }
     let name = host_name();
     let _discovery = publish_discovery(&name);
     println!("kitvr-server, platform: {}", platform::NAME);
@@ -329,10 +446,8 @@ fn main() -> io::Result<()> {
     println!("using the ffmpeg bridge: {settings:?}");
     println!("audio: {audio_cfg:?}");
 
-    let udp = Arc::new(UdpSocket::bind(("0.0.0.0", MEDIA_PORT))?);
-    udp.set_read_timeout(Some(Duration::from_millis(200)))?;
     let listener = TcpListener::bind(("0.0.0.0", CONTROL_PORT))?;
-    println!("listening: control TCP {CONTROL_PORT}, media UDP {MEDIA_PORT}");
+    println!("listening: control TCP {CONTROL_PORT}, media UDP {MEDIA_PORT} per session");
 
     for stream in listener.incoming() {
         match stream {
@@ -341,7 +456,13 @@ fn main() -> io::Result<()> {
                     println!("control connection from {peer}");
                 }
                 let _ = s.set_nodelay(true);
-                if let Err(e) = handle_control(s, &settings, &audio_cfg, &udp) {
+                let result = media_socket(&s, MEDIA_PORT).and_then(|socket| {
+                    #[cfg(any(target_os = "linux", windows))]
+                    { handle_control(s, &settings, &audio_cfg, &Arc::new(socket), mouse.clone()) }
+                    #[cfg(not(any(target_os = "linux", windows)))]
+                    { handle_control(s, &settings, &audio_cfg, &Arc::new(socket)) }
+                });
+                if let Err(e) = result {
                     eprintln!("connection error: {e}");
                 }
             }
@@ -349,4 +470,75 @@ fn main() -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_settings_must_fit_the_wire_format_and_encoder() {
+        let valid = bridge::Settings::default();
+        assert!(validate_settings(&valid).is_ok());
+        for width in [0, 1, 3, 65535, 65536] {
+            assert!(validate_settings(&bridge::Settings { width, ..valid.clone() }).is_err());
+        }
+        for height in [0, 1, 3, 65535, 65536] {
+            assert!(validate_settings(&bridge::Settings { height, ..valid.clone() }).is_err());
+        }
+        for fps in [0, 65536] {
+            assert!(validate_settings(&bridge::Settings { fps, ..valid.clone() }).is_err());
+        }
+        assert!(validate_settings(&bridge::Settings { bitrate_kbps: 0, ..valid.clone() }).is_err());
+        assert!(validate_settings(&bridge::Settings { gop: 0, ..valid.clone() }).is_err());
+        assert!(validate_settings(&bridge::Settings {
+            width: 65534, height: 65534, fps: 65535, ..valid.clone()
+        }).is_ok());
+        assert!(validate_settings(&bridge::Settings { stereo_sbs: true, ..valid.clone() }).is_err());
+        assert!(validate_settings(&bridge::Settings {
+            source: bridge::Source::File("stereo.mp4".into()), stereo_sbs: true, ..valid
+        }).is_ok());
+    }
+
+    #[test]
+    fn malformed_numeric_options_are_errors() {
+        assert_eq!(parse_number("--fps", "90"), Ok(90));
+        for value in ["", "-1", "abc", "4294967296"] {
+            assert!(parse_number("--fps", value).is_err());
+        }
+    }
+
+    #[test]
+    fn media_uses_the_control_connections_local_address() -> io::Result<()> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let _client = TcpStream::connect(listener.local_addr()?)?;
+        let (control, _) = listener.accept()?;
+        let media = media_socket(&control, 0)?;
+        assert_eq!(media.local_addr()?.ip(), control.local_addr()?.ip());
+
+        let receiver = UdpSocket::bind(("127.0.0.1", 0))?;
+        receiver.set_read_timeout(Some(Duration::from_secs(2)))?;
+        media.send_to(b"video", receiver.local_addr()?)?;
+        let mut buf = [0; 8];
+        let (len, from) = receiver.recv_from(&mut buf)?;
+        assert_eq!(&buf[..len], b"video");
+        assert_eq!(from, media.local_addr()?);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn media_source_matches_the_selected_address_on_a_multihomed_host() -> io::Result<()> {
+        let listener = TcpListener::bind(("127.0.0.2", 0))?;
+        let _client = TcpStream::connect(listener.local_addr()?)?;
+        let (control, _) = listener.accept()?;
+        let media = media_socket(&control, 0)?;
+        let receiver = UdpSocket::bind(("127.0.0.1", 0))?;
+        receiver.set_read_timeout(Some(Duration::from_secs(2)))?;
+        media.send_to(b"video", receiver.local_addr()?)?;
+        let mut buf = [0; 8];
+        let (_, from) = receiver.recv_from(&mut buf)?;
+        assert_eq!(from.ip(), control.local_addr()?.ip());
+        Ok(())
+    }
 }

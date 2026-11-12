@@ -9,7 +9,7 @@ The reference implementation of the parts marked "implemented" is `crates/proto`
 |---|---|---|---|---|
 | Discovery | mDNS | 5353 | server announces | Find the PC |
 | Control | TCP | 9943 | both | Handshake, config, loss recovery, keepalive |
-| Media | UDP | 9944 | video: server to client, tracking/body: client to server | Low-latency data |
+| Media | UDP | 9944 | video: server to client, tracking/body/views: client to server | Low-latency data |
 
 ## Discovery
 
@@ -78,13 +78,18 @@ Design notes:
 - **Slices.** The server sends each encoder slice as soon as it is produced. Because the total
   size of later slices is unknown when the first is sent, `packet_idx` and `packet_count`
   are scoped to a slice, not a frame.
-- **Pose timestamp.** The client stamps each tracking packet with its own monotonic clock. The
-  server copies the timestamp of the pose a frame was rendered for into `pose_timestamp_us`,
-  and the client uses it to reproject. No clock synchronization is needed because the value is
-  only ever interpreted by the side that created it.
+- **Pose timestamp.** The client stamps each tracking packet with its own monotonic clock. A
+  future VR frame source must copy the timestamp of the pose the frame was rendered for into
+  `pose_timestamp_us`, so the client can use it for reprojection. No clock synchronization is
+  needed because the value is only interpreted by the side that created it. A value of zero
+  means that the render pose is unknown; desktop, test-pattern and video-file sources always use
+  zero. A recently received tracking pose is not necessarily the pose used to render a frame.
+  The current client does not yet reproject video frames.
 - **Payload size.** Default 1200 bytes per packet to stay under a 1500 byte MTU with IP/UDP headers.
 - **Loss handling (v1).** If any packet of a slice is missing when the next frame's packets
-  begin to arrive, the client drops that frame and sends `KeyframeRequest`. FEC is a later addition.
+  begin to arrive, the client drops that frame and sends `KeyframeRequest`. The client also drops
+  in-progress frames with inconsistent packet counts, keyframe flags, pose timestamps, or
+  conflicting duplicate packet contents. FEC is a later addition.
 
 ## Audio packets (implemented)
 
@@ -122,9 +127,17 @@ Client to server, UDP, sent every display frame (72 to 120 Hz). 136 bytes.
 Hand block: `u16 buttons`, `u16 flags` (bit0 = active), `f32 trigger`, `f32 grip`,
 `f32 stick_x`, `f32 stick_y`, then pose as above (28 bytes).
 
+The SteamVR driver ignores duplicate and older sequence numbers, using 16-bit wraparound
+ordering. It resets the sequence after tracking times out so a restarted client can reconnect.
+
 The Quest client fills in the head pose and, when Touch controllers are active, sends their grip
-poses, trigger, squeeze, thumbstick, and basic buttons in the hand blocks. SteamVR controller
-support is experimental; desktop-mode pointer input remains separate.
+poses, trigger, squeeze, thumbstick, and basic buttons in the hand blocks. Otherwise, when hand
+tracking is available, it sends the palm pose and derives trigger and grip from finger positions.
+This fallback is independent of controller-action availability; missing finger positions release
+the affected gestures without discarding a valid palm pose. Pinch does not synthesize the primary
+button. SteamVR dashboard bindings map trigger/pinch to left-click and grip/grab to right-click.
+SteamVR controller support is
+experimental; desktop-mode pointer input remains separate.
 
 ## Body-tracking packets (optional)
 
@@ -145,6 +158,24 @@ SteamVR driver on UDP port 9945.
 Each pose is position xyz and orientation quaternion xyzw as seven little-endian `f32` values.
 Only joints whose active-mask bit is set are valid. Runtimes without Meta's full-body extension
 may report torso joints only; unsupported lower-body points remain inactive.
+Body packets use their own sequence counter and timeout, independent of head and hand packets.
+
+## View configuration packets (optional)
+
+The client periodically sends the actual stereo view geometry after tracking starts. The server
+forwards it to the local SteamVR driver. Older clients omit it, leaving the driver's defaults.
+Each packet is 92 bytes:
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | type, 6 = view configuration |
+| 1 | u8 | packet version, 1 |
+| 2 | u16 | reserved, 0 |
+| 4 | 2 x 44 bytes | left and right eye blocks |
+
+Each eye block contains four `f32` projection tangents in OpenVR order (left, right, top,
+bottom), followed by an eye-to-head pose (position xyz, quaternion xyzw). OpenXR's up/down
+angles are negated when converted to OpenVR's vertical tangent convention.
 
 ## Security
 

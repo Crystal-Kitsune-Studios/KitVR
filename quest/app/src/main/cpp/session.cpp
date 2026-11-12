@@ -11,11 +11,15 @@
 
 #include <chrono>
 
+#include "control_send.h"
 #include "log.h"
+#include "video_frame.h"
 
 namespace kitvr {
 
 namespace {
+
+constexpr uint64_t kControlTimeoutUs = 5000000;
 
 int connectSocket(const std::string& host, uint16_t port, int socktype) {
     addrinfo hints{};
@@ -52,10 +56,11 @@ void Session::startControl(const std::string& host) {
     controlThread_ = std::thread(&Session::controlLoop, this);
 }
 
-bool Session::takeConfig(StreamConfig& out) {
+bool Session::takeConfig(StreamConfig& out, uint32_t& epoch) {
     std::lock_guard<std::mutex> lk(cfgMutex_);
     if (!pendingCfg_) return false;
-    out = *pendingCfg_;
+    out = pendingCfg_->config;
+    epoch = pendingCfg_->epoch;
     pendingCfg_.reset();
     return true;
 }
@@ -63,24 +68,41 @@ bool Session::takeConfig(StreamConfig& out) {
 void Session::sendControl(const std::vector<uint8_t>& data) {
     std::lock_guard<std::mutex> lk(sendMutex_);
     if (controlFd_ < 0) return;
-    send(controlFd_, data.data(), data.size(), MSG_NOSIGNAL);
+    if (!sendControlPacket(controlFd_, data.data(), data.size())) {
+        LOGW("control send failed: %d; reconnecting", errno);
+        controlStopping_ = true;
+        controlReady_ = false;
+        if (::shutdown(controlFd_, SHUT_RDWR) != 0) {
+            LOGW("cannot shut down failed control connection: %d", errno);
+        }
+    }
 }
 
 bool Session::handleMessage(const Message& m) {
     switch (m.tag) {
         case kHello:
             LOGI("server hello: %s (protocol %u)", m.name.c_str(), m.version);
-            epoch_++;
             if (m.version != kProtocolVersion) {
                 LOGE("protocol version mismatch");
                 return false;
+            }
+            {
+                std::lock_guard<std::mutex> lk(sendMutex_);
+                if (!running_ || controlStopping_) return false;
+                {
+                    std::lock_guard<std::mutex> configLock(cfgMutex_);
+                    pendingCfg_.reset();
+                    audioCfg_.reset();
+                }
+                epoch_++;
+                controlReady_ = true;
             }
             break;
         case kStreamConfig: {
             LOGI("stream config: codec %u %ux%u @%u, %u kbps", m.cfg.codec, m.cfg.width,
                  m.cfg.height, m.cfg.fps, m.cfg.bitrateKbps);
             std::lock_guard<std::mutex> lk(cfgMutex_);
-            pendingCfg_ = m.cfg;
+            pendingCfg_ = PendingConfig{m.cfg, epoch_};
             break;
         }
         case kAudioConfig: {
@@ -118,6 +140,7 @@ void Session::controlLoop() {
         {
             std::lock_guard<std::mutex> lk(sendMutex_);
             controlFd_ = fd;
+            controlStopping_ = false;
         }
         LOGI("control connected to %s", host_.c_str());
         sendControl(encodeHello("Quest"));
@@ -125,6 +148,7 @@ void Session::controlLoop() {
         ControlReader reader;
         uint8_t buf[2048];
         uint64_t lastPing = nowUs();
+        uint64_t lastReceived = lastPing;
         bool alive = true;
         while (running_ && alive) {
             pollfd pfd{fd, POLLIN, 0};
@@ -136,20 +160,30 @@ void Session::controlLoop() {
             if (r > 0) {
                 ssize_t n = recv(fd, buf, sizeof(buf), 0);
                 if (n <= 0) break;
+                lastReceived = nowUs();
                 reader.feed(buf, static_cast<size_t>(n));
                 Message m;
                 int s;
                 while ((s = reader.next(m)) == 1) {
-                    if (!handleMessage(m)) alive = false;
+                    if (!handleMessage(m)) {
+                        alive = false;
+                        break;
+                    }
                 }
                 if (s < 0) alive = false;
             }
-            if (nowUs() - lastPing > 1000000) {
-                sendControl(encodePing(nowUs()));
-                lastPing = nowUs();
+            const uint64_t now = nowUs();
+            if (now - lastReceived > kControlTimeoutUs) {
+                LOGW("control connection timed out, reconnecting");
+                break;
+            }
+            if (now - lastPing > 1000000) {
+                sendControl(encodePing(now));
+                lastPing = now;
             }
         }
 
+        controlReady_ = false;
         {
             std::lock_guard<std::mutex> lk(sendMutex_);
             controlFd_ = -1;
@@ -197,6 +231,16 @@ void Session::stopMedia() {
         udpFd_ = -1;
     }
     mediaRunning_ = false;
+    if (running_) {
+        std::lock_guard<std::mutex> lk(sendMutex_);
+        if (controlFd_ >= 0) {
+            controlStopping_ = true;
+            controlReady_ = false;
+            if (::shutdown(controlFd_, SHUT_RDWR) != 0) {
+                LOGW("cannot restart control connection after media stops: %d", errno);
+            }
+        }
+    }
 }
 
 bool Session::wantsMic() {
@@ -246,21 +290,15 @@ void Session::sendBodyTracking(uint64_t tsUs, uint16_t activeMask,
     send(udpFd_, pkt.data(), pkt.size(), 0);
 }
 
-void Session::mediaLoop() {
-    struct FrameAsm {
-        uint32_t id = 0;
-        uint16_t count = 0;
-        uint16_t got = 0;
-        bool key = false;
-        bool delivered = false;
-        uint64_t poseTs = 0;
-        std::vector<std::vector<uint8_t>> parts;
-        std::vector<bool> have;
-    };
+void Session::sendViewConfig(const EyeViewConfig eyes[2]) {
+    if (!mediaRunning_ || udpFd_ < 0) return;
+    const auto pkt = encodeViewConfig(eyes);
+    send(udpFd_, pkt.data(), pkt.size(), 0);
+}
 
+void Session::mediaLoop() {
     std::vector<uint8_t> buf(2048);
-    FrameAsm cur;
-    bool haveCur = false;
+    std::optional<VideoFrame> cur;
     bool waitingForKey = true;  // join the stream at a keyframe
     uint32_t lastGood = 0;
     uint32_t seenEpoch = epoch_;
@@ -281,7 +319,7 @@ void Session::mediaLoop() {
 
         if (epoch_ != seenEpoch) {  // new control session means the server restarted its stream
             seenEpoch = epoch_;
-            haveCur = false;
+            cur.reset();
             waitingForKey = true;
         }
 
@@ -300,47 +338,39 @@ void Session::mediaLoop() {
         // Version 1 of the client handles one slice per frame.
         if (h.sliceCount != 1 || h.sliceIdx != 0 || h.packetCount == 0 || h.packetIdx >= h.packetCount) continue;
 
-        bool newer = !haveCur || static_cast<int32_t>(h.frameId - cur.id) > 0;
+        bool newer = !cur || static_cast<int32_t>(h.frameId - cur->id) > 0;
         if (newer) {
-            if (haveCur && !cur.delivered) {  // the previous frame never completed
+            if (cur && (!cur->delivered || h.frameId != cur->id + 1u)) {
+                if (!waitingForKey) LOGW("video frame lost; waiting for a keyframe");
                 waitingForKey = true;
                 requestKey();
             }
-            cur = FrameAsm{};
-            cur.id = h.frameId;
-            cur.count = h.packetCount;
-            cur.key = (h.flags & kFlagKeyframe) != 0;
-            cur.poseTs = h.poseTimestampUs;
-            cur.parts.assign(cur.count, std::vector<uint8_t>());
-            cur.have.assign(cur.count, false);
-            haveCur = true;
-        } else if (h.frameId != cur.id) {
+            cur.emplace(h);
+        } else if (h.frameId != cur->id) {
             continue;  // late packet from an older frame
         }
 
-        if (h.packetCount != cur.count) continue;
-        if (!cur.have[h.packetIdx]) {
-            cur.parts[h.packetIdx].assign(payload, payload + h.payloadLen);
-            cur.have[h.packetIdx] = true;
-            cur.got++;
+        if (cur->delivered) continue;
+        const bool alreadyRejected = cur->isRejected();
+        auto result = cur->add(h, payload);
+        if (result == VideoFrame::Result::Invalid) {
+            if (!alreadyRejected) LOGW("inconsistent video frame packets; waiting for a keyframe");
+            waitingForKey = true;
+            requestKey();
+            continue;
         }
-
-        if (cur.got == cur.count && !cur.delivered) {
-            cur.delivered = true;
-            std::vector<uint8_t> au;
-            size_t total = 0;
-            for (auto& p : cur.parts) total += p.size();
-            au.reserve(total);
-            for (auto& p : cur.parts) au.insert(au.end(), p.begin(), p.end());
-
-            if (waitingForKey && !cur.key) {
+        if (result == VideoFrame::Result::Complete) {
+            cur->delivered = true;
+            if (waitingForKey && !cur->key) {
                 requestKey();  // references are broken, skip until the next keyframe
             } else {
                 waitingForKey = false;
-                lastGood = cur.id;
-                if (!decoder_.submit(std::move(au), cur.key, static_cast<int64_t>(cur.poseTs))) {
+                const auto pts = cur->poseTs ? cur->poseTs : nowUs();
+                if (!decoder_.submit(cur->assemble(), cur->key, static_cast<int64_t>(pts))) {
                     waitingForKey = true;
                     requestKey();
+                } else {
+                    lastGood = cur->id;
                 }
             }
         }
@@ -349,6 +379,7 @@ void Session::mediaLoop() {
 
 void Session::shutdown() {
     running_ = false;
+    controlReady_ = false;
     if (controlThread_.joinable()) controlThread_.join();
     stopMedia();
 }

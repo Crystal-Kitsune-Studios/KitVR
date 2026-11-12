@@ -18,6 +18,8 @@ pub const TRACKING_LEN: usize = 136;
 pub const PACKET_TYPE_BODY_TRACKING: u8 = 5;
 pub const BODY_TRACKING_JOINTS: usize = 6;
 pub const BODY_TRACKING_LEN: usize = 16 + BODY_TRACKING_JOINTS * 28;
+pub const PACKET_TYPE_VIEW_CONFIG: u8 = 6;
+pub const VIEW_CONFIG_LEN: usize = 4 + 2 * 44;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Pose {
@@ -159,6 +161,42 @@ impl BodyTracking {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EyeView {
+    /// OpenVR projection tangents: left, right, top, bottom.
+    pub projection: [f32; 4],
+    /// Eye pose relative to the headset.
+    pub eye_to_head: Pose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ViewConfig {
+    pub eyes: [EyeView; 2],
+}
+
+impl ViewConfig {
+    pub fn parse(buf: &[u8]) -> Result<Self, DecodeError> {
+        if buf.len() < VIEW_CONFIG_LEN {
+            return Err(DecodeError::Truncated);
+        }
+        if buf.len() != VIEW_CONFIG_LEN {
+            return Err(DecodeError::BadLength);
+        }
+        if buf[0] != PACKET_TYPE_VIEW_CONFIG || buf[1] != 1 {
+            return Err(DecodeError::BadType(buf[0]));
+        }
+        let mut eyes = [EyeView::default(); 2];
+        for (i, eye) in eyes.iter_mut().enumerate() {
+            let start = 4 + i * 44;
+            for (j, value) in eye.projection.iter_mut().enumerate() {
+                *value = get_f32(&buf[start + j * 4..]);
+            }
+            eye.eye_to_head = Pose::parse(&buf[start + 16..start + 44]);
+        }
+        Ok(Self { eyes })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +236,22 @@ mod tests {
         packet.write_to(&mut bytes);
         assert_eq!(bytes.len(), BODY_TRACKING_LEN);
         assert_eq!(BodyTracking::parse(&bytes).unwrap(), packet);
+    }
+
+    #[test]
+    fn view_config_parses_two_distinct_eyes_and_rejects_bad_packets() {
+        let mut bytes = vec![PACKET_TYPE_VIEW_CONFIG, 1, 0, 0];
+        for eye in 0..2 {
+            for value in [-1.0, 1.1 + eye as f32, -0.9, 1.0, eye as f32, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0] {
+                put_f32(&mut bytes, value);
+            }
+        }
+        let parsed = ViewConfig::parse(&bytes).unwrap();
+        assert_eq!(parsed.eyes[0].projection, [-1.0, 1.1, -0.9, 1.0]);
+        assert_eq!(parsed.eyes[1].projection, [-1.0, 2.1, -0.9, 1.0]);
+        assert_eq!(parsed.eyes[1].eye_to_head.position, [1.0, 0.0, 0.0]);
+        assert_eq!(ViewConfig::parse(&bytes[..bytes.len() - 1]), Err(DecodeError::Truncated));
+        bytes[1] = 2;
+        assert!(ViewConfig::parse(&bytes).is_err());
     }
 }
