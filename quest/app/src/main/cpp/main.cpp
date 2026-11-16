@@ -945,7 +945,11 @@ void renderFrame(AppState& S) {
     if (fs.shouldRender &&
         (!S.net.controlReady() || S.videoEpoch != S.net.controlEpoch() ||
          !S.net.mediaRunning() || !S.net.videoHasRenderedFrame())) {
-        const auto* waiting = S.waitScene.render(S.session, S.viewSpace, fs.predictedDisplayTime);
+        const auto phase = S.net.controlReady()
+                               ? WaitScene::Phase::StartingStream
+                               : WaitScene::Phase::Connecting;
+        const auto* waiting = S.waitScene.render(
+            S.session, S.viewSpace, fs.predictedDisplayTime, phase, 0.0f);
         if (waiting) layers[layerCount++] = waiting;
     } else if (fs.shouldRender && S.videoSwapchain != XR_NULL_HANDLE && S.cfg.height > 0) {
         const uint32_t eyeWidth = S.cfg.stereoSbs && S.cfg.width >= 2 && S.cfg.width % 2 == 0
