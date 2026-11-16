@@ -30,10 +30,10 @@ modules:
     buildsystem: simple
     build-commands:
       - >-
-        sed -i
-        -e '/CMP0025/d'
-        -e '/CMP0054/d'
-        -e 's/cmake_minimum_required(VERSION [^)]*)/cmake_minimum_required(VERSION 3.5)/'
+        sed -i -E
+        -e '/cmake_policy\(SET CMP0025 OLD\)/s/OLD/NEW/'
+        -e '/cmake_policy\(SET CMP0054 OLD\)/s/OLD/NEW/'
+        -e 's/cmake_minimum_required\(VERSION [^)]*\)/cmake_minimum_required(VERSION 3.5)/'
         source/CMakeLists.txt
       - >-
         cmake -S source -B build -G Ninja
