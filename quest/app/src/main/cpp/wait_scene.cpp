@@ -1,11 +1,15 @@
 #include "wait_scene.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <initializer_list>
 #include <cstdint>
 #include <vector>
 
 #include "log.h"
 #include "proto.h"
+#include "wait_logo.h"
 
 namespace {
 
@@ -16,65 +20,218 @@ void main() {
 }
 )";
 
-const char* kFragmentShader = R"(#version 300 es
+// Shared declarations come first so the logo slot in wait_logo.h can use them.
+const char* kFragmentHeader = R"(#version 300 es
 precision highp float;
 precision highp int;
+)";
+
+const char* kFragmentShader = R"(
 uniform float uTime;
+uniform float uPhaseTime;
+uniform int uPhase;
+uniform float uReveal;
 uniform vec2 uSize;
+uniform vec4 uTangents;     // tan of the left, right, down and up field of view angles
+uniform vec4 uOrientation;  // eye orientation quaternion in the scene space
+uniform vec3 uEyePosition;
+uniform int uText[20];
+uniform int uTextLength;
 out vec4 color;
 
-uint glyph(int letter, int row) {
-    const uint C[7] = uint[7](14u,17u,16u,16u,16u,17u,14u);
-    const uint O[7] = uint[7](14u,17u,17u,17u,17u,17u,14u);
-    const uint N[7] = uint[7](17u,25u,25u,21u,19u,19u,17u);
-    const uint E[7] = uint[7](31u,16u,16u,30u,16u,16u,31u);
-    const uint T[7] = uint[7](31u,4u,4u,4u,4u,4u,4u);
-    const uint I[7] = uint[7](14u,4u,4u,4u,4u,4u,14u);
-    const uint G[7] = uint[7](14u,17u,16u,23u,17u,17u,15u);
-    if (letter == 0 || letter == 5) return C[row];
-    if (letter == 1) return O[row];
-    if (letter == 2 || letter == 3 || letter == 8) return N[row];
-    if (letter == 4) return E[row];
-    if (letter == 6) return T[row];
-    if (letter == 7) return I[row];
-    return G[row];
+// Panels sit on a plane in front of the starting head position, in metres.
+const float kPanelDistance = 2.5;
+const vec2 kLogoCenter = vec2(0.0, 0.24);
+const float kLogoHalfSize = 0.40;
+const vec2 kTextCenter = vec2(0.0, -0.24);
+const float kTextCell = 0.017;
+
+// 5x7 glyphs, top row first, for the letters C O N E T I G P S A R M D.
+const uint kFont[91] = uint[91](
+    14u,17u,16u,16u,16u,17u,14u,  14u,17u,17u,17u,17u,17u,14u,  17u,17u,25u,21u,19u,17u,17u,
+    31u,16u,16u,30u,16u,16u,31u,  31u,4u,4u,4u,4u,4u,4u,         14u,4u,4u,4u,4u,4u,14u,
+    14u,17u,16u,23u,17u,17u,15u,  30u,17u,17u,30u,16u,16u,16u,  15u,16u,16u,14u,1u,1u,30u,
+    14u,17u,17u,31u,17u,17u,17u,  30u,17u,17u,30u,20u,18u,17u,  17u,27u,21u,21u,17u,17u,17u,
+    28u,18u,17u,17u,17u,18u,28u);
+
+vec3 rotate(vec4 q, vec3 v) {
+    vec3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
 }
 
-void main() {
-    vec2 p = (gl_FragCoord.xy - 0.5 * uSize) / uSize.y;
-    float glow = exp(-3.2 * length(p - vec2(0.0, 0.08)));
-    vec3 bg = mix(vec3(0.025, 0.045, 0.052), vec3(0.075, 0.105, 0.105), glow);
-    float radius = length(p - vec2(0.0, 0.08));
-    float ring = 1.0 - smoothstep(0.002, 0.005, abs(radius - 0.14));
-    float angle = atan(p.y - 0.08, p.x);
-    float sweep = pow(max(0.0, 0.5 + 0.5 * cos(angle - uTime * 1.2)), 5.0);
-    bg += vec3(0.95, 0.55, 0.25) * ring * (0.18 + 0.82 * sweep);
-    float inner = 1.0 - smoothstep(0.001, 0.003, abs(radius - 0.105));
-    bg += vec3(0.35, 0.65, 0.70) * inner * 0.35;
-    float core = 1.0 - smoothstep(0.015, 0.025, radius);
-    bg += vec3(0.95, 0.60, 0.32) * core * (0.55 + 0.15 * sin(uTime * 2.0));
+float hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+}
 
-    // A compact bitmap label avoids depending on platform fonts or external assets.
-    vec2 pixel = (p - vec2(-0.15, -0.15)) / 0.005;
-    int col = int(floor(pixel.x));
-    int row = 6 - int(floor(pixel.y));
-    if (col >= 0 && col < 59 && row >= 0 && row < 7 && col % 6 < 5) {
-        uint bits = glyph(col / 6, row);
-        if ((bits & (1u << uint(4 - col % 6))) != 0u) bg = vec3(0.86, 0.90, 0.88);
+vec3 hash33(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.xxy + p.yxx) * p.zyx);
+}
+
+float noise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(hash13(i), hash13(i + vec3(1, 0, 0)), f.x),
+                   mix(hash13(i + vec3(0, 1, 0)), hash13(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(hash13(i + vec3(0, 0, 1)), hash13(i + vec3(1, 0, 1)), f.x),
+                   mix(hash13(i + vec3(0, 1, 1)), hash13(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+
+float fbm(vec3 p) {
+    float sum = 0.0;
+    float amplitude = 0.5;
+    for (int i = 0; i < 4; ++i) {
+        sum += amplitude * noise(p);
+        p = p * 2.03 + vec3(1.7, 9.2, 4.1);
+        amplitude *= 0.5;
     }
-    for (int i = 0; i < 3; ++i) {
-        float dot = 1.0 - smoothstep(0.003, 0.006,
-            length(p - vec2((float(i) - 1.0) * 0.025, -0.205)));
-        float pulse = 0.35 + 0.65 * (0.5 + 0.5 * sin(uTime * 3.0 - float(i) * 0.8));
-        bg += vec3(0.95, 0.55, 0.25) * dot * pulse;
+    return sum;
+}
+
+// One layer of stars on the sky sphere. Each grid cell holds at most one star.
+vec3 stars(vec3 dir, float scale, float density, float pixel, float seed) {
+    vec3 p = dir * scale;
+    vec3 cell = floor(p);
+    vec3 h = hash33(cell + seed);
+    if (hash13(cell + seed + 7.1) > density) return vec3(0.0);
+    vec3 star = normalize(cell + 0.2 + 0.6 * h) * scale;
+    float size = pixel * scale * mix(0.9, 2.4, h.x * h.x * h.x);
+    float core = 1.0 - smoothstep(0.0, size, length(p - star));
+    float twinkle = 0.65 + 0.35 * sin(uTime * (0.8 + 2.5 * h.y) + h.z * 6.2831853);
+    vec3 tint = mix(vec3(0.70, 0.82, 1.0), vec3(1.0, 0.82, 0.62), h.z);
+    return tint * core * core * twinkle * mix(0.6, 2.2, h.x);
+}
+
+vec3 nebula(vec3 dir) {
+    vec3 q = dir * 2.2 + vec3(0.0, 0.0, uTime * 0.012);
+    float shape = fbm(q + 1.3 * fbm(q * 1.6 + 4.0));
+    float band = exp(-pow(dot(dir, normalize(vec3(0.35, 1.0, 0.25))) * 2.6, 2.0));
+    float density = smoothstep(0.35, 0.85, shape) * (0.25 + 0.75 * band);
+    vec3 violet = vec3(0.20, 0.06, 0.32);
+    vec3 teal = vec3(0.03, 0.20, 0.26);
+    vec3 ember = vec3(0.85, 0.38, 0.12);
+    vec3 tint = mix(violet, teal, smoothstep(0.3, 0.7, noise(q * 0.7 + 11.0)));
+    tint = mix(tint, ember, smoothstep(0.72, 0.95, shape) * 0.6);
+    return vec3(0.004, 0.005, 0.014) + tint * density * 0.55;
+}
+
+// A ringless planet low on the left, half lit from the side, with a thin atmosphere.
+vec3 planet(vec3 dir, inout float covered) {
+    const vec3 center = normalize(vec3(-0.80, -0.38, -0.55));
+    const float radius = 0.30;
+    vec3 side = normalize(cross(center, vec3(0.0, 1.0, 0.0)));
+    vec3 up = cross(side, center);
+    vec2 local = vec2(dot(dir, side), dot(dir, up)) / sin(radius);
+    float r = length(local);
+    if (dot(dir, center) <= 0.0) return vec3(0.0);
+    vec3 light = normalize(vec3(0.3, 0.6, -0.75));
+    if (r < 1.0) {
+        covered = 1.0;
+        vec3 normal = local.x * side + local.y * up - sqrt(1.0 - r * r) * center;
+        float diffuse = smoothstep(-0.15, 0.7, dot(normal, light));
+        float bands = 0.5 + 0.5 * sin(local.y * 14.0 + 3.0 * noise(normal * 3.0 + uTime * 0.02));
+        vec3 surface = mix(vec3(0.10, 0.12, 0.30), vec3(0.32, 0.22, 0.45), bands);
+        float rim = pow(1.0 - sqrt(1.0 - r * r), 3.0);
+        return surface * (0.03 + diffuse) + vec3(0.25, 0.55, 0.65) * rim * (0.2 + diffuse);
     }
-    color = vec4(bg, 1.0);
+    float lit = max(dot(normalize(local.x * side + local.y * up), light), 0.0);
+    return vec3(0.20, 0.50, 0.65) * exp(-(r - 1.0) * 28.0) * (0.15 + 0.85 * lit) * 0.6;
+}
+
+// Streaks rushing outwards from straight ahead while the stream takes over.
+float warp(vec3 dir, float amount) {
+    if (amount <= 0.0) return 0.0;
+    float fromForward = acos(clamp(-dir.z, -1.0, 1.0));
+    float around = atan(dir.y, dir.x) / 6.2831853 + 0.5;
+    float lane = floor(around * 220.0);
+    float h = hash13(vec3(lane, 3.7, 1.3));
+    float across = abs(fract(around * 220.0) - 0.5);
+    float thin = 1.0 - smoothstep(0.08, 0.30, across);
+    float along = fract(h * 7.0 + fromForward * 1.2 - uPhaseTime * (1.5 + 2.5 * h));
+    float dash = smoothstep(0.0, 0.5, along) * (1.0 - smoothstep(0.55, 0.62, along));
+    return thin * dash * step(0.7, h) * smoothstep(0.03, 0.35, fromForward) * amount;
+}
+
+float text(vec2 plane) {
+    int columns = uTextLength * 6 - 1;
+    vec2 g = plane / kTextCell + vec2(float(columns) * 0.5, 3.5);
+    if (g.x < 0.0 || g.y < 0.0) return 0.0;
+    int col = int(floor(g.x));
+    int row = 6 - int(floor(g.y));
+    if (col >= columns || row < 0 || col % 6 == 5) return 0.0;
+    int letter = uText[col / 6];
+    if (letter < 0) return 0.0;
+    return float((kFont[letter * 7 + row] >> uint(4 - col % 6)) & 1u);
+}
+
+vec4 kitvrLogo(vec2 uv, float time, int phase);
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / uSize;
+    vec3 viewDir = vec3(mix(uTangents.x, uTangents.y, uv.x), mix(uTangents.z, uTangents.w, uv.y), -1.0);
+    vec3 dir = normalize(rotate(uOrientation, normalize(viewDir)));
+    float pixel = (uTangents.y - uTangents.x) / uSize.x;
+    float reveal = uPhase == 2 ? clamp(uReveal, 0.0, 1.0) : 0.0;
+
+    vec3 sky = nebula(dir);
+    float covered = 0.0;
+    vec3 world = planet(dir, covered);
+    vec3 starLight = stars(dir, 45.0, 0.22, pixel, 0.0) + stars(dir, 120.0, 0.10, pixel, 19.0) * 0.35;
+    vec3 col = sky * (1.0 - covered) + world + starLight * (1.0 - covered);
+
+    float rush = smoothstep(0.0, 0.35, reveal);
+    col += vec3(0.80, 0.88, 1.0) * warp(dir, rush) * 1.4;
+    float fromForward = acos(clamp(-dir.z, -1.0, 1.0));
+    col += vec3(1.0, 0.85, 0.70) * exp(-fromForward * 5.0) * rush * (1.0 - reveal) * 1.5;
+
+    // Panels are on a vertical plane, so intersect the eye ray with it for correct stereo depth.
+    if (dir.z < -0.01) {
+        float t = (-kPanelDistance - uEyePosition.z) / dir.z;
+        vec2 plane = uEyePosition.xy + dir.xy * t;
+        float panelFade = 1.0 - smoothstep(0.0, 0.3, reveal);
+
+        vec2 logoUv = (plane - kLogoCenter) / kLogoHalfSize;
+        if (abs(logoUv.x) <= 1.0 && abs(logoUv.y) <= 1.0) {
+            vec4 logo = kitvrLogo(logoUv, uTime, uPhase) * panelFade;
+            col = col * (1.0 - logo.a) + logo.rgb;
+        }
+
+        float letters = text(plane - kTextCenter);
+        col = mix(col, vec3(0.88, 0.92, 1.0), letters * panelFade);
+
+        for (int i = 0; i < 3; ++i) {
+            vec2 dotCenter = kTextCenter + vec2((float(i) - 1.0) * 0.045, -0.10);
+            float dotShape = 1.0 - smoothstep(0.009, 0.014, length(plane - dotCenter));
+            float pulse = 0.30 + 0.70 * (0.5 + 0.5 * sin(uTime * 3.0 - float(i) * 0.8));
+            col += vec3(0.95, 0.55, 0.25) * dotShape * pulse * panelFade;
+        }
+    }
+
+    float alpha = smoothstep(0.0, 1.0, uTime) * (1.0 - smoothstep(0.45, 1.0, reveal));
+    color = vec4(col * alpha, alpha);
 }
 )";
 
-GLuint compileShader(GLenum type, const char* source) {
+constexpr const char* kLetters = "CONETIGPSARMD";
+constexpr int kMaxTextLength = 20;
+
+const char* phaseText(WaitScene::Phase phase) {
+    switch (phase) {
+        case WaitScene::Phase::Connecting: return "CONNECTING TO PC";
+        case WaitScene::Phase::StartingStream: return "STARTING STREAM";
+        case WaitScene::Phase::Connected: return "CONNECTED";
+    }
+    return "";
+}
+
+GLuint compileShader(GLenum type, std::initializer_list<const char*> sources) {
     GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &source, nullptr);
+    std::vector<const char*> parts(sources);
+    glShaderSource(shader, static_cast<GLsizei>(parts.size()), parts.data(), nullptr);
     glCompileShader(shader);
     GLint ok = GL_FALSE;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
@@ -128,8 +285,9 @@ bool WaitScene::initialize(XrInstance instance, XrSystemId system, XrSession ses
         return false;
     }
 
-    GLuint vertex = compileShader(GL_VERTEX_SHADER, kVertexShader);
-    GLuint fragment = compileShader(GL_FRAGMENT_SHADER, kFragmentShader);
+    GLuint vertex = compileShader(GL_VERTEX_SHADER, {kVertexShader});
+    GLuint fragment = compileShader(GL_FRAGMENT_SHADER,
+                                    {kFragmentHeader, kWaitLogoShader, kFragmentShader});
     if (!vertex || !fragment) {
         if (vertex) glDeleteShader(vertex);
         if (fragment) glDeleteShader(fragment);
@@ -151,7 +309,15 @@ bool WaitScene::initialize(XrInstance instance, XrSystemId system, XrSession ses
         return false;
     }
     timeUniform_ = glGetUniformLocation(program_, "uTime");
+    phaseUniform_ = glGetUniformLocation(program_, "uPhase");
+    phaseTimeUniform_ = glGetUniformLocation(program_, "uPhaseTime");
+    revealUniform_ = glGetUniformLocation(program_, "uReveal");
     sizeUniform_ = glGetUniformLocation(program_, "uSize");
+    tangentsUniform_ = glGetUniformLocation(program_, "uTangents");
+    orientationUniform_ = glGetUniformLocation(program_, "uOrientation");
+    eyePositionUniform_ = glGetUniformLocation(program_, "uEyePosition");
+    textUniform_ = glGetUniformLocation(program_, "uText");
+    textLengthUniform_ = glGetUniformLocation(program_, "uTextLength");
     glGenFramebuffers(1, &framebuffer_);
     glGenVertexArrays(1, &vertexArray_);
 
@@ -198,8 +364,14 @@ bool WaitScene::initialize(XrInstance instance, XrSystemId system, XrSession ses
     return true;
 }
 
-const XrCompositionLayerBaseHeader* WaitScene::render(XrSession session, XrSpace space, XrTime time) {
+const XrCompositionLayerBaseHeader* WaitScene::render(XrSession session, XrSpace space, XrTime time,
+                                                     Phase phase, float reveal) {
     if (!program_ || eyes_.empty() || renderFailed_) return nullptr;
+    const uint64_t now = kitvr::nowUs();
+    if (phase != phase_ || phaseStartUs_ == 0) {
+        phase_ = phase;
+        phaseStartUs_ = now;
+    }
     XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
     locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     locate.displayTime = time;
@@ -216,7 +388,19 @@ const XrCompositionLayerBaseHeader* WaitScene::render(XrSession session, XrSpace
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
-    glUniform1f(timeUniform_, static_cast<float>(kitvr::nowUs() - startUs_) / 1000000.0f);
+    glUniform1f(timeUniform_, static_cast<float>(now - startUs_) / 1000000.0f);
+    glUniform1f(phaseTimeUniform_, static_cast<float>(now - phaseStartUs_) / 1000000.0f);
+    glUniform1i(phaseUniform_, static_cast<GLint>(phase));
+    glUniform1f(revealUniform_, reveal);
+    GLint text[kMaxTextLength];
+    const char* label = phaseText(phase);
+    const GLint textLength = static_cast<GLint>(std::min<size_t>(std::strlen(label), kMaxTextLength));
+    for (GLint i = 0; i < textLength; ++i) {
+        const char* letter = std::strchr(kLetters, label[i]);
+        text[i] = label[i] != ' ' && letter ? static_cast<GLint>(letter - kLetters) : -1;
+    }
+    glUniform1iv(textUniform_, textLength, text);
+    glUniform1i(textLengthUniform_, textLength);
     bool rendered = true;
     for (uint32_t i = 0; i < count; ++i) {
         Eye& eye = eyes_[i];
@@ -241,7 +425,14 @@ const XrCompositionLayerBaseHeader* WaitScene::render(XrSession session, XrSpace
             rendered = false;
         } else {
             glViewport(0, 0, eye.width, eye.height);
+            const XrView& view = views_[i];
             glUniform2f(sizeUniform_, static_cast<float>(eye.width), static_cast<float>(eye.height));
+            glUniform4f(tangentsUniform_, std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
+                        std::tan(view.fov.angleDown), std::tan(view.fov.angleUp));
+            glUniform4f(orientationUniform_, view.pose.orientation.x, view.pose.orientation.y,
+                        view.pose.orientation.z, view.pose.orientation.w);
+            glUniform3f(eyePositionUniform_, view.pose.position.x, view.pose.position.y,
+                        view.pose.position.z);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             glFlush();
         }
@@ -263,6 +454,8 @@ const XrCompositionLayerBaseHeader* WaitScene::render(XrSession session, XrSpace
         renderFailed_ = true;
         return nullptr;
     }
+    // The shader writes premultiplied alpha so the scene can fade out over the video.
+    layer_.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     layer_.space = space;
     layer_.viewCount = count;
     layer_.views = projectionViews_.data();

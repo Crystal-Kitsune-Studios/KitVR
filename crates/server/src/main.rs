@@ -3,7 +3,7 @@ mod bridge;
 #[cfg(any(target_os = "linux", windows))]
 mod mouse;
 mod platform;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod steamvr;
 #[cfg(target_os = "linux")]
 mod wayland;
@@ -35,8 +35,8 @@ kitvr-server [options]
 Video:
   --source testpattern|desktop|file:<path>|steamvr
                                              what to stream (default testpattern)
-                                             steamvr reads the frames the KitVR Vulkan layer
-                                             captures from vrcompositor on Linux
+                                             steamvr reads SteamVR's frames: from the KitVR
+                                             Vulkan layer on Linux, from the KitVR driver on Windows
   --encoder libx265|hevc_nvenc|hevc_amf|hevc_qsv|hevc_vaapi   (default libx265)
     --width N --height N --fps N               encoded frame size and rate (default 1920 1080 60)
     --stereo-sbs                                file input is side-by-side; width is both eyes
@@ -67,7 +67,7 @@ fn parse_number(option: &str, value: &str) -> Result<u32, String> {
 fn stereo_capable(source: &bridge::Source) -> bool {
     match source {
         bridge::Source::File(_) => true,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         bridge::Source::SteamVr(_) => true,
         _ => false,
     }
@@ -109,7 +109,7 @@ fn parse_args() -> (bridge::Settings, audio::AudioSettings, bool) {
                     "testpattern" => bridge::Source::TestPattern,
                     "desktop" => bridge::Source::Desktop,
                     "steamvr" => {
-                        #[cfg(target_os = "linux")]
+                        #[cfg(any(target_os = "linux", windows))]
                         {
                             let name = std::env::var("KITVR_STEAMVR_SHM")
                                 .unwrap_or_else(|_| steamvr::DEFAULT_NAME.to_string());
@@ -121,9 +121,9 @@ fn parse_args() -> (bridge::Settings, audio::AudioSettings, bool) {
                                 }
                             }
                         }
-                        #[cfg(not(target_os = "linux"))]
+                        #[cfg(not(any(target_os = "linux", windows)))]
                         {
-                            eprintln!("--source steamvr is only available on Linux");
+                            eprintln!("--source steamvr is only available on Linux and Windows");
                             std::process::exit(2);
                         }
                     }

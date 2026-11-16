@@ -138,6 +138,10 @@ jobs:
           cmake --build steamvr/build --config Release
           cmake --install steamvr/build --prefix steamvr/package
 
+      - name: Test the Windows SteamVR frame ring
+        if: runner.os == 'Windows'
+        run: ctest --test-dir steamvr/build -C Release -R kitvr_frame_ring_test --output-on-failure
+
       - name: Package Windows app
         if: runner.os == 'Windows'
         shell: pwsh

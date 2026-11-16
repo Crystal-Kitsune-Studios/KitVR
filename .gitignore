@@ -8,3 +8,5 @@ local.properties
 *.h265
 *.mp4
 frame.png
+linux/vklayer/build/
+steamvr/package/

@@ -8,7 +8,7 @@ layer in `vklayer/` instead.
   to start with "Shared IPC Compositor Init Failed (303)". The driver therefore only returns that
   interface on Windows.
 
-The layer is loaded into `vrcompositor` only, intercepts the swapchain it presents its mirror into,
+The layer is loaded into `vrcompositor` only, gives it a virtual direct mode display (see below),
 copies each presented image to a host visible buffer, and publishes the pixels into a POSIX shared
 memory ring. `kitvr-server --source steamvr` reads that ring and streams it.
 
@@ -55,7 +55,7 @@ release store, so a reader never sees a partially written frame under a fresh id
 | 4 | 4 | version, currently `1` |
 | 8 | 4 | width in pixels |
 | 12 | 4 | height in pixels |
-| 16 | 4 | format, `0` = BGRA8, `1` = RGBA8 |
+| 16 | 4 | format, `0` = BGRA8, `1` = RGBA8, `2` = X2RGB10 (A2R10G10B10), `3` = X2BGR10 (A2B10G10R10) |
 | 20 | 4 | stride in bytes, always `width * 4` |
 | 24 | 4 | payload bytes, `stride * height` |
 | 28 | 4 | reserved |
@@ -72,8 +72,59 @@ release store, so a reader never sees a partially written frame under a fresh id
 - Set `KITVR_LAYER_DEBUG=1` before starting SteamVR for layer logs on stderr, which SteamVR writes
   to its own log.
 - `ls -l /dev/shm/kitvr-steamvr` shows the ring and its size. The size is `48 + width * height * 4`.
+- vrcompositor reports `VRInitError_Compositor_CannotDRMLeaseDisplay`: it did not find the virtual
+  display. Check that the log says "Looking for direct display through Vulkan WSI" and that
+  `kitvr-layer: virtual display` appears in `vrcompositor-linux.txt`.
 - "unsupported swapchain format" in the layer log means vrcompositor is presenting a format the
   layer does not copy yet; add it to `shmFormat()` in `vklayer/kitvr_layer.cpp`.
+
+## Virtual display
+
+SteamVR for Linux has no extended mode: vrcompositor only renders to a display it drives directly,
+which it normally leases from the Wayland compositor or finds through RandR. A streamed headset has
+no such display, so the layer provides one. With `KITVR_VIRTUAL_DISPLAY=1` (set by the wrapper) it:
+
+- adds a "KitVR virtual HMD" display, plane and 90 Hz mode to `VK_KHR_display` enumeration and
+  accepts every attempt to acquire it;
+- implements the swapchain on that display's surface itself, pacing acquires like a FIFO display
+  and answering vblank events, swapchain counters and display timing queries from a simulated
+  refresh clock;
+- copies every presented image into the frame ring instead of showing it.
+
+The wrapper also hides `WAYLAND_DISPLAY` from vrcompositor so it skips the Wayland lease and finds
+the virtual display through Vulkan WSI. The compositor log then shows:
+
+```
+Tried to find direct display through Vulkan WSI: 0x4b56520000000001
+Headset is using direct mode
+```
+
+The display size must match the SteamVR driver's window bounds, 3664x1920 (two 1832x1920 eyes) by
+default. Override it with `KITVR_DISPLAY_WIDTH`, `KITVR_DISPLAY_HEIGHT` and `KITVR_DISPLAY_HZ` in the
+wrapper if the driver changes.
+
+`tests/virtual_display_test.cpp` drives the virtual display the way vrcompositor does and checks
+the pacing and the ring contents:
+
+```
+cmake -S linux/vklayer -B linux/vklayer/build -DKITVR_LAYER_TESTS=ON
+cmake --build linux/vklayer/build
+KITVR_VIRTUAL_DISPLAY=1 KITVR_DISPLAY_WIDTH=640 KITVR_DISPLAY_HEIGHT=360 \
+KITVR_STEAMVR_SHM=kitvr-display-test VK_LAYER_PATH=linux/vklayer/build \
+VK_INSTANCE_LAYERS=VK_LAYER_CKS_kitvr linux/vklayer/build/virtual_display_test
+```
+
+## Steam Link and safe mode
+
+While the KitVR driver is registered it is the active HMD, including when you would rather use
+Steam Link. Unregister it with `vrpathreg removedriver` to use Steam Link again.
+
+If SteamVR exits uncleanly shortly after starting, it enters safe mode and blocks add-on drivers
+("Not loading driver kitvr because it was blocked by a previous safe mode event"). Re-enable KitVR
+in SteamVR's Settings, Startup / Shutdown, Manage Add-ons.
+
+SteamVR enters standby when the headset sends no tracking, and the compositor then stops drawing.
+Start `kitvr-server` and the Quest client so poses reach the driver.
 
 ## Limitations
 
@@ -82,5 +133,8 @@ release store, so a reader never sees a partially written frame under a fresh id
   for the same result.
 - The captured image is whatever vrcompositor presents, including the mirror layout. Choose the
   eye layout in SteamVR's display mirror settings before streaming.
+- At the default 3664x1920 the server's CPU path (copy, pipe, colour conversion in ffmpeg) does not
+  sustain 90 fps; the layer itself publishes at the display rate.
+- SteamVR updates replace `vrcompositor`; run `install.sh` again after an update.
 - The image is not reprojected. SteamVR renders at its own resolution and the headset displays it
   as a flat stereo pair, so head motion is tracked but not compensated.

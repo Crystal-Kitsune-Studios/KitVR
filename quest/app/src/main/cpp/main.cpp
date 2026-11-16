@@ -127,6 +127,7 @@ struct AppState {
     uint64_t lastPermCheckUs = 0;
     uint64_t lastViewConfigUs = 0;
     uint64_t lastVideoTryUs = 0;
+    uint64_t revealStartUs = 0;
 
     kitvr::Session net;
     WaitScene waitScene;
@@ -929,13 +930,17 @@ void renderFrame(AppState& S) {
 
     XrCompositionLayerQuad leftQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
     XrCompositionLayerQuad rightQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    const XrCompositionLayerBaseHeader* layers[2] = {nullptr, nullptr};
+    const XrCompositionLayerBaseHeader* layers[3] = {nullptr, nullptr, nullptr};
     uint32_t layerCount = 0;
-    if (fs.shouldRender &&
-        (!S.net.controlReady() || S.videoEpoch != S.net.controlEpoch() ||
-         !S.net.mediaRunning() || !S.net.videoHasRenderedFrame())) {
-        const auto* waiting = S.waitScene.render(S.session, S.viewSpace, fs.predictedDisplayTime);
-        if (waiting) layers[layerCount++] = waiting;
+    const bool waiting = !S.net.controlReady() || S.videoEpoch != S.net.controlEpoch() ||
+                         !S.net.mediaRunning() || !S.net.videoHasRenderedFrame();
+    if (waiting) S.revealStartUs = 0;
+    if (fs.shouldRender && waiting) {
+        const auto phase = S.net.controlReady() ? WaitScene::Phase::StartingStream
+                                                : WaitScene::Phase::Connecting;
+        const auto* scene = S.waitScene.render(S.session, S.localSpace, fs.predictedDisplayTime,
+                                               phase, 0.0f);
+        if (scene) layers[layerCount++] = scene;
     } else if (fs.shouldRender && S.videoSwapchain != XR_NULL_HANDLE && S.cfg.height > 0) {
         const uint32_t eyeWidth = S.cfg.stereoSbs && S.cfg.width >= 2 && S.cfg.width % 2 == 0
                                       ? S.cfg.width / 2
@@ -965,6 +970,16 @@ void renderFrame(AppState& S) {
         } else {
             configureQuad(leftQuad, XR_EYE_VISIBILITY_BOTH, 0);
             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&leftQuad);
+        }
+        // Keep the waiting scene on top briefly so it warps away instead of cutting to the video.
+        const uint64_t now = kitvr::nowUs();
+        if (S.revealStartUs == 0) S.revealStartUs = now;
+        const float reveal = static_cast<float>(now - S.revealStartUs) /
+                             (WaitScene::kRevealSeconds * 1000000.0f);
+        if (reveal < 1.0f) {
+            const auto* scene = S.waitScene.render(S.session, S.localSpace, fs.predictedDisplayTime,
+                                                   WaitScene::Phase::Connected, reveal);
+            if (scene) layers[layerCount++] = scene;
         }
     }
 

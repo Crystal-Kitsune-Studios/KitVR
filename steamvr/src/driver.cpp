@@ -2,6 +2,7 @@
 #include "view_config.h"
 #include "hand_state.h"
 #include "tracking_sequence.h"
+#include "frame_capture_win.h"
 
 #include <array>
 #include <chrono>
@@ -76,6 +77,12 @@ float readF32Le(const uint8_t* bytes) {
 
 vr::HmdMatrix34_t poseMatrix(const float* pose);
 
+#ifdef _WIN32
+void driverLog(const char* message) {
+    if (auto* log = vr::VRDriverLog()) log->Log(message);
+}
+#endif
+
 class Hmd final : public vr::ITrackedDeviceServerDriver,
                   public vr::IVRDisplayComponent,
                   public vr::IVRVirtualDisplay {
@@ -94,6 +101,13 @@ public:
         vr::VRProperties()->SetFloatProperty(container, vr::Prop_DisplayFrequency_Float, 90.0f);
         vr::VRProperties()->SetFloatProperty(container, vr::Prop_UserIpdMeters_Float, 0.064f);
         vr::VRProperties()->SetBoolProperty(container, vr::Prop_HasDisplayComponent_Bool, true);
+#ifdef _WIN32
+        // The compositor must render on the adapter that opens its shared backbuffer.
+        uint64_t luid = 0;
+        if (capture_.init(&luid) && luid != 0) {
+            vr::VRProperties()->SetUint64Property(container, vr::Prop_GraphicsAdapterLuid_Uint64, luid);
+        }
+#endif
         return vr::VRInitError_None;
     }
 
@@ -221,11 +235,21 @@ public:
         return true;
     }
 
-    void Present(const vr::PresentInfo_t*, uint32_t) override {
+    void Present(const vr::PresentInfo_t* info, uint32_t size) override {
         lastPresent_ = std::chrono::steady_clock::now();
+#ifdef _WIN32
+        if (info && size >= sizeof(vr::SharedTextureHandle_t)) capture_.present(info->backbufferTextureHandle);
+#else
+        (void)info;
+        (void)size;
+#endif
     }
 
-    void WaitForPresent() override {}
+    void WaitForPresent() override {
+#ifdef _WIN32
+        capture_.wait();
+#endif
+    }
 
     bool GetTimeSinceLastVsync(float* secondsSinceVsync, uint64_t* frameCounter) override {
         constexpr double frameInterval = 1.0 / 90.0;
@@ -248,6 +272,9 @@ private:
     bool geometryApplied_ = false;
     std::chrono::steady_clock::time_point startTime_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point lastPresent_{};
+#ifdef _WIN32
+    kitvr::D3D11FrameCapture capture_{driverLog};
+#endif
 };
 
 vr::HmdMatrix34_t poseMatrix(const float* pose) {

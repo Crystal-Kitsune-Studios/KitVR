@@ -17,8 +17,10 @@ Android app (Java launcher and C++ via the NDK) using OpenXR. One APK for Quest 
   controller inputs. On runtimes that expose Meta's full-body joint set, selected body trackers
   are also sent to the SteamVR driver. The first head packet tells the server where to send video.
   Hand tracking currently emulates basic controller inputs rather than streaming finger skeletons.
-6. An animated connecting scene fills the headset view while waiting for the first video frame,
-  including after a control reconnection.
+6. A space scene surrounds you while waiting for the first video frame, including after a control
+  reconnection. It shows whether the client is still connecting or the stream is starting, then
+  warps away over the first video frames. The logo panel is drawn by `kitvrLogo()` in
+  `wait_logo.h`; replace that function to change the logo animation.
   Optional waiting music plays quietly and fades out when that frame renders. Turn it off with
   **Music while connecting** in the launcher.
 
@@ -39,7 +41,8 @@ app/src/main/
   res/xml/file_paths.xml                         secure APK sharing for installation
   cpp/
     main.cpp      OpenXR setup, event loop, quad layer
-    wait_scene.*  animated immersive connecting scene
+    wait_scene.*  immersive space scene shown while connecting
+    wait_logo.h   logo animation slot drawn inside that scene
     session.*     control channel, UDP receive, frame reassembly, keyframe requests
     decoder.*     AMediaCodec wrapper (low-latency HEVC)
     audio.*       AAudio playback of PC audio and microphone capture

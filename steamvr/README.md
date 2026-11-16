@@ -13,9 +13,33 @@ The controller profile supplies default legacy-game and SteamVR dashboard bindin
 
 Remove it with `vrpathreg removedriver <path-to-kitvr-directory>`.
 
-On Linux the frame path above does not exist, because SteamVR for Linux does not start the
+## Frames on Windows
+
+The driver exposes `IVRVirtualDisplay`. SteamVR's compositor hands it the finished, side-by-side
+backbuffer (3664x1920 by default) as a shared D3D11 texture on every frame. The driver copies it to
+a staging texture in `Present`, reads it back in `WaitForPresent`, and publishes the pixels into
+the named shared memory section `Local\kitvr-steamvr`, with the same layout as the Linux ring
+(see [../linux/README.md](../linux/README.md#shared-memory-ring)). Stream it with:
+
+```
+kitvr-server --source steamvr --stereo-sbs --encoder hevc_nvenc
+```
+
+The driver sets `Prop_GraphicsAdapterLuid_Uint64` to the first hardware GPU, because a shared
+texture can only be opened on the adapter that created it. On a laptop with two GPUs, SteamVR then
+renders on that one. Set `KITVR_STEAMVR_SHM` to the same name for SteamVR and the server to use a
+different section name. Driver messages (for example an unsupported backbuffer format) appear in
+SteamVR's `vrserver.txt` log with a `KitVR:` prefix.
+
+## Frames on Linux
+
+On Linux the Windows frame path does not exist, because SteamVR for Linux does not start the
 compositor when a driver exposes `IVRVirtualDisplay` and does not implement
 `IVRDriverDirectModeComponent` at all. The driver only returns `IVRVirtualDisplay` on Windows; on
 Linux, frames are captured by the Vulkan layer described in [../linux/README.md](../linux/README.md).
 
-This is not yet a complete wireless HMD driver: it does not capture the SteamVR virtual-display frame for transmission to the Quest. The Quest client can present a side-by-side stereo video file through the normal stream path with the server's `--stereo-sbs` option, but live SteamVR game frames are not yet displayed in the headset. Lower-body trackers require the runtime's Meta full-body extension; older runtimes provide torso joints only or no body tracking.
+## Limitations
+
+The image is the compositor's output, so it is not reprojected for head motion that happens
+during streaming. Lower-body trackers require the runtime's Meta full-body extension; older runtimes
+provide torso joints only or no body tracking.

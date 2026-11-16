@@ -10,7 +10,7 @@ use std::io::{self, Read};
 use std::net::{SocketAddr, UdpSocket};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use std::sync::Arc;
 
 use kitvr_core::proto::video::{packetize_slice, SliceInfo};
@@ -23,8 +23,9 @@ pub enum Source {
     File(String),
     #[cfg(target_os = "linux")]
     Wayland(Arc<crate::wayland::WaylandCapture>),
-    /// Frames captured from vrcompositor by the KitVR Vulkan layer (Linux only).
-    #[cfg(target_os = "linux")]
+    /// SteamVR compositor frames: from the KitVR Vulkan layer on Linux, from the driver's
+    /// virtual display on Windows.
+    #[cfg(any(target_os = "linux", windows))]
     SteamVr(Arc<crate::steamvr::SteamVrRing>),
 }
 
@@ -98,7 +99,7 @@ pub fn ffmpeg_args(s: &Settings) -> Vec<String> {
             a.push(format!("{}x{}", s.width, s.height));
             a.extend(v(&["-framerate", fps.as_str(), "-i", "pipe:0"]));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         Source::SteamVr(ring) => {
             // The input geometry is whatever the layer captured; --width and --height scale it.
             a.extend(v(&["-f", "rawvideo", "-pixel_format", ring.pixel_format(), "-video_size"]));
@@ -109,9 +110,9 @@ pub fn ffmpeg_args(s: &Settings) -> Vec<String> {
 
     let mut vf = format!("scale={}:{},fps={}", s.width, s.height, s.fps);
     // A captured framebuffer is already the right way up; only captured desktop frames are flipped.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     let flip = !matches!(s.source, Source::SteamVr(_));
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     let flip = true;
     if flip {
         vf.push_str(",vflip");
@@ -256,7 +257,13 @@ pub fn run(
     } else {
         command.stdin(Stdio::null());
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    if matches!(settings.source, Source::SteamVr(_)) {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     command.stdin(Stdio::null());
 
     let mut child = match command.spawn() {
@@ -273,7 +280,7 @@ pub fn run(
 
     // The capture thread owns ffmpeg's stdin and stops when the ring goes quiet and `stop` is set,
     // or when ffmpeg exits and the pipe breaks.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     let feeder = match &settings.source {
         Source::SteamVr(ring) => child.stdin.take().map(|stdin| {
             spawn_ring_feeder(Arc::clone(ring), stdin, settings.fps, StopFlag(stop as *const AtomicBool))
@@ -336,7 +343,7 @@ pub fn run(
     }
     let _ = child.kill();
     let _ = child.wait();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     if let Some(handle) = feeder {
         let _ = handle.join();
     }
@@ -349,13 +356,13 @@ pub fn run(
 
 /// A raw pointer to the caller's stop flag. The feeder thread is always joined before `run`
 /// returns, so the reference outlives it.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 struct StopFlag(*const AtomicBool);
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 unsafe impl Send for StopFlag {}
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn spawn_ring_feeder(
     ring: Arc<crate::steamvr::SteamVrRing>,
     mut stdin: std::process::ChildStdin,

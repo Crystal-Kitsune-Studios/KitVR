@@ -92,8 +92,8 @@ tools and plugins required for Wayland capture.
 SteamVR builds also publish a separate `KitVR-steamvr-driver-windows-x86_64.zip` or
 `KitVR-steamvr-driver-linux-x86_64.tar.gz`. This experimental HMD driver registers the headset and
 forwards Quest head/controller poses and basic controller input into SteamVR over loopback UDP
-port 9945. It does not yet capture and stream SteamVR's stereo eye images, so it is not yet a
-complete SteamVR streaming mode.
+port 9945. On Windows it also captures SteamVR's composited frames for
+`kitvr-server --source steamvr --stereo-sbs`; see [steamvr/README.md](steamvr/README.md).
 
 Build the tracking prototype locally with CMake 3.22 or newer:
 
@@ -176,14 +176,16 @@ Replacing the bridge with the native backends in `crates/server/src/platform/` r
 | Quest client: OpenXR, MediaCodec, networking | implemented; tested on Quest 2 |
 | Audio: PC to headset, and microphone to PC | implemented, untested on hardware |
 | Controller and hand input | basic controller emulation and opt-in mouse control |
-| SteamVR frames on Linux (Vulkan layer) | implemented, unverified on hardware |
+| SteamVR frames on Linux (Vulkan layer, virtual display) | streams the SteamVR compositor end to end; headset untested |
+| SteamVR frames on Windows (driver virtual display) | implemented, untested on Windows |
 | Authentication and encryption | not started |
 
 SteamVR streaming and body tracking remain experimental and depend on runtime and hardware support.
 
 On Linux the SteamVR driver cannot receive frames at all, because SteamVR for Linux does not hand
-them to drivers. KitVR captures them with a Vulkan layer loaded into vrcompositor instead, and
-`kitvr-server --source steamvr` streams the result. See [linux/README.md](linux/README.md).
+them to drivers and only renders to a display it drives directly. KitVR's Vulkan layer gives
+vrcompositor a virtual display and captures what it renders, and `kitvr-server --source steamvr`
+streams the result. See [linux/README.md](linux/README.md).
 
 ## Next steps
 
