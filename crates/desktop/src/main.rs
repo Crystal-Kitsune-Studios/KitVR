@@ -56,6 +56,7 @@ struct KitVrApp {
     host_ip: String,
     source: String,
     file_path: String,
+    stereo_sbs: bool,
     encoder: String,
     resolution: String,
     fps: u32,
@@ -106,6 +107,7 @@ enum UpdateAction {
 struct SavedSettings {
     source: String,
     file_path: String,
+    stereo_sbs: bool,
     encoder: String,
     resolution: String,
     fps: u32,
@@ -120,6 +122,7 @@ impl Default for SavedSettings {
         Self {
             source: "Test pattern".to_string(),
             file_path: String::new(),
+            stereo_sbs: false,
             encoder: "libx265".to_string(),
             resolution: RESOLUTIONS[0].to_string(),
             fps: 60,
@@ -177,6 +180,7 @@ impl KitVrApp {
             host_ip: local_ip(),
             source: settings.source,
             file_path: settings.file_path,
+            stereo_sbs: settings.stereo_sbs,
             encoder: settings.encoder,
             resolution: settings.resolution,
             fps: settings.fps,
@@ -232,10 +236,17 @@ impl KitVrApp {
             return;
         };
 
-        let (width, height) = parse_resolution(&self.resolution);
+        // Only the file and SteamVR sources can carry a stereo pair.
+        let stereo = self.stereo_sbs && (self.source == "SteamVR" || self.source == "File");
+        let (mut width, height) = parse_resolution(&self.resolution);
+        if stereo {
+            // The chosen resolution is per eye; the stream is both eyes side by side.
+            width *= 2;
+        }
         let source = match self.source.as_str() {
             "Desktop" => "desktop".to_string(),
             "File" => format!("file:{}", self.file_path.trim()),
+            "SteamVR" => "steamvr".to_string(),
             _ => "testpattern".to_string(),
         };
         let mut args = vec![
@@ -265,6 +276,9 @@ impl KitVrApp {
         }
         if self.mouse_enabled {
             args.push("--enable-mouse".to_string());
+        }
+        if stereo {
+            args.push("--stereo-sbs".to_string());
         }
 
         match Command::new(&executable)
@@ -472,6 +486,7 @@ impl eframe::App for KitVrApp {
         let settings = SavedSettings {
             source: self.source.clone(),
             file_path: self.file_path.clone(),
+            stereo_sbs: self.stereo_sbs,
             encoder: self.encoder.clone(),
             resolution: self.resolution.clone(),
             fps: self.fps,
@@ -693,7 +708,7 @@ impl KitVrApp {
                                 .selected_text(RichText::new(source).size(13.5).color(TEXT))
                                 .width(ui.available_width())
                                 .show_ui(ui, |ui| {
-                                    for option in ["Test pattern", "Desktop", "File"] {
+                                    for option in ["Test pattern", "Desktop", "File", "SteamVR"] {
                                         ui.selectable_value(
                                             &mut self.source,
                                             option.to_string(),
@@ -728,6 +743,23 @@ impl KitVrApp {
                                     .frame(false),
                             );
                         });
+                    }
+
+                    if self.source == "SteamVR" || self.source == "File" {
+                        ui.add_space(10.0);
+                        ui.checkbox(
+                            &mut self.stereo_sbs,
+                            RichText::new("Side-by-side stereo (both eyes)").size(13.0).color(TEXT),
+                        );
+                        if self.stereo_sbs {
+                            ui.label(
+                                RichText::new(
+                                    "Resolution is per eye, so the stream is sent double wide.",
+                                )
+                                .size(11.5)
+                                .color(MUTED),
+                            );
+                        }
                     }
 
                     ui.add_space(8.0);
@@ -1405,6 +1437,7 @@ mod tests {
             host_ip: String::new(),
             source: settings.source,
             file_path: settings.file_path,
+            stereo_sbs: settings.stereo_sbs,
             encoder: settings.encoder,
             resolution: settings.resolution,
             fps: settings.fps,
