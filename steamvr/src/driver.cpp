@@ -2,7 +2,6 @@
 #include "view_config.h"
 #include "hand_state.h"
 #include "tracking_sequence.h"
-#include "frame_capture_win.h"
 
 #include <array>
 #include <chrono>
@@ -77,12 +76,6 @@ float readF32Le(const uint8_t* bytes) {
 
 vr::HmdMatrix34_t poseMatrix(const float* pose);
 
-#ifdef _WIN32
-void driverLog(const char* message) {
-    if (auto* log = vr::VRDriverLog()) log->Log(message);
-}
-#endif
-
 class Hmd final : public vr::ITrackedDeviceServerDriver,
                   public vr::IVRDisplayComponent,
                   public vr::IVRVirtualDisplay {
@@ -99,15 +92,9 @@ public:
         vr::VRProperties()->SetStringProperty(container, vr::Prop_SerialNumber_String, "KITVR-HMD-001");
         vr::VRProperties()->SetStringProperty(container, vr::Prop_ManufacturerName_String, "Crystal Kitsune Studios");
         vr::VRProperties()->SetFloatProperty(container, vr::Prop_DisplayFrequency_Float, 90.0f);
+        vr::VRProperties()->SetFloatProperty(container, vr::Prop_SecondsFromVsyncToPhotons_Float, 0.011f);
         vr::VRProperties()->SetFloatProperty(container, vr::Prop_UserIpdMeters_Float, 0.064f);
         vr::VRProperties()->SetBoolProperty(container, vr::Prop_HasDisplayComponent_Bool, true);
-#ifdef _WIN32
-        // The compositor must render on the adapter that opens its shared backbuffer.
-        uint64_t luid = 0;
-        if (capture_.init(&luid) && luid != 0) {
-            vr::VRProperties()->SetUint64Property(container, vr::Prop_GraphicsAdapterLuid_Uint64, luid);
-        }
-#endif
         return vr::VRInitError_None;
     }
 
@@ -207,6 +194,20 @@ public:
             appliedViews_ = views;
             geometryApplied_ = true;
         }
+        {
+            // Tie world scale to the headset's real IPD instead of the fixed 64 mm guess.
+            const auto& left = views[0].eyeToHead;
+            const auto& right = views[1].eyeToHead;
+            const float dx = right[0] - left[0];
+            const float dy = right[1] - left[1];
+            const float dz = right[2] - left[2];
+            const float ipd = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (ipd > 0.03f && ipd < 0.09f) {
+                vr::VRProperties()->SetFloatProperty(
+                    vr::VRProperties()->TrackedDeviceToPropertyContainer(objectId_),
+                    vr::Prop_UserIpdMeters_Float, ipd);
+            }
+        }
         vr::HmdRect2_t rects[2]{};
         for (size_t eye = 0; eye < views.size(); ++eye) {
             const auto& p = views[eye].projection;
@@ -235,21 +236,11 @@ public:
         return true;
     }
 
-    void Present(const vr::PresentInfo_t* info, uint32_t size) override {
+    void Present(const vr::PresentInfo_t*, uint32_t) override {
         lastPresent_ = std::chrono::steady_clock::now();
-#ifdef _WIN32
-        if (info && size >= sizeof(vr::SharedTextureHandle_t)) capture_.present(info->backbufferTextureHandle);
-#else
-        (void)info;
-        (void)size;
-#endif
     }
 
-    void WaitForPresent() override {
-#ifdef _WIN32
-        capture_.wait();
-#endif
-    }
+    void WaitForPresent() override {}
 
     bool GetTimeSinceLastVsync(float* secondsSinceVsync, uint64_t* frameCounter) override {
         constexpr double frameInterval = 1.0 / 90.0;
@@ -272,9 +263,6 @@ private:
     bool geometryApplied_ = false;
     std::chrono::steady_clock::time_point startTime_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point lastPresent_{};
-#ifdef _WIN32
-    kitvr::D3D11FrameCapture capture_{driverLog};
-#endif
 };
 
 vr::HmdMatrix34_t poseMatrix(const float* pose) {
@@ -314,6 +302,10 @@ public:
         properties->SetInt32Property(container, vr::Prop_ControllerRoleHint_Int32,
                                      left_ ? vr::TrackedControllerRole_LeftHand
                                            : vr::TrackedControllerRole_RightHand);
+        properties->SetStringProperty(container, vr::Prop_ControllerType_String, "kitvr_touch");
+        properties->SetStringProperty(container, vr::Prop_RenderModelName_String,
+                                      left_ ? "{oculus}/rendermodels/oculus_cv1_controller_left"
+                                            : "{oculus}/rendermodels/oculus_cv1_controller_right");
         properties->SetUint64Property(container, vr::Prop_SupportedButtons_Uint64,
                                       vr::ButtonMaskFromId(vr::k_EButton_ApplicationMenu) |
                                           vr::ButtonMaskFromId(vr::k_EButton_Grip) |
