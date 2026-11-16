@@ -48,8 +48,19 @@
 
 namespace {
 
-constexpr float kQuadHeightM = 1.6f;
 constexpr float kQuadDistanceM = 2.0f;
+
+// Rotates a vector by a quaternion, so the video quad can be placed along the eye's
+// actual view direction instead of assuming the head faces -Z.
+XrVector3f rotateVector(const XrQuaternionf& q, const XrVector3f& v) {
+    const XrVector3f u{q.x, q.y, q.z};
+    const XrVector3f t{2.0f * (u.y * v.z - u.z * v.y),
+                       2.0f * (u.z * v.x - u.x * v.z),
+                       2.0f * (u.x * v.y - u.y * v.x)};
+    return {v.x + q.w * t.x + (u.y * t.z - u.z * t.y),
+            v.y + q.w * t.y + (u.z * t.x - u.x * t.z),
+            v.z + q.w * t.z + (u.x * t.y - u.y * t.x)};
+}
 constexpr const char* kDefaultHost = "192.168.1.100";
 constexpr const char* kHostFile = "/sdcard/Android/data/com.crystalkitsune.kitvr/files/host.txt";
 constexpr const char* kMetaFullBodyExtensionName = "XR_META_body_tracking_full_body";
@@ -127,7 +138,6 @@ struct AppState {
     uint64_t lastPermCheckUs = 0;
     uint64_t lastViewConfigUs = 0;
     uint64_t lastVideoTryUs = 0;
-    uint64_t revealStartUs = 0;
 
     kitvr::Session net;
     WaitScene waitScene;
@@ -930,23 +940,47 @@ void renderFrame(AppState& S) {
 
     XrCompositionLayerQuad leftQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
     XrCompositionLayerQuad rightQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    const XrCompositionLayerBaseHeader* layers[3] = {nullptr, nullptr, nullptr};
+    const XrCompositionLayerBaseHeader* layers[2] = {nullptr, nullptr};
     uint32_t layerCount = 0;
-    const bool waiting = !S.net.controlReady() || S.videoEpoch != S.net.controlEpoch() ||
-                         !S.net.mediaRunning() || !S.net.videoHasRenderedFrame();
-    if (waiting) S.revealStartUs = 0;
-    if (fs.shouldRender && waiting) {
-        const auto phase = S.net.controlReady() ? WaitScene::Phase::StartingStream
-                                                : WaitScene::Phase::Connecting;
-        const auto* scene = S.waitScene.render(S.session, S.localSpace, fs.predictedDisplayTime,
-                                               phase, 0.0f);
-        if (scene) layers[layerCount++] = scene;
+    if (fs.shouldRender &&
+        (!S.net.controlReady() || S.videoEpoch != S.net.controlEpoch() ||
+         !S.net.mediaRunning() || !S.net.videoHasRenderedFrame())) {
+        const auto* waiting = S.waitScene.render(S.session, S.viewSpace, fs.predictedDisplayTime);
+        if (waiting) layers[layerCount++] = waiting;
     } else if (fs.shouldRender && S.videoSwapchain != XR_NULL_HANDLE && S.cfg.height > 0) {
         const uint32_t eyeWidth = S.cfg.stereoSbs && S.cfg.width >= 2 && S.cfg.width % 2 == 0
                                       ? S.cfg.width / 2
                                       : S.cfg.width;
+        // The frame is a rectilinear render of the eye frustum, so a flat quad that spans the
+        // same frustum reproduces it exactly. Sizing it from the real FOV is what makes it
+        // fill the view instead of hanging in front of you like a monitor.
+        XrViewLocateInfo quadViewInfo{XR_TYPE_VIEW_LOCATE_INFO};
+        quadViewInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        quadViewInfo.displayTime = fs.predictedDisplayTime;
+        quadViewInfo.space = S.viewSpace;
+        XrViewState quadViewState{XR_TYPE_VIEW_STATE};
+        XrView eyeViews[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+        uint32_t eyeCount = 0;
+        const bool haveEyes =
+            XR_SUCCEEDED(xrLocateViews(S.session, &quadViewInfo, &quadViewState, 2, &eyeCount,
+                                       eyeViews)) && eyeCount == 2;
+        if (!haveEyes) {
+            for (auto& view : eyeViews) {
+                view.fov = {-0.85f, 0.85f, 0.85f, -0.85f};
+                view.pose.orientation.w = 1.0f;
+            }
+        }
         auto configureQuad = [&](XrCompositionLayerQuad& quad, XrEyeVisibility eye,
-                                 uint32_t imageX) {
+                                 uint32_t imageX, const XrView& view) {
+            const float tanLeft = std::tan(view.fov.angleLeft);
+            const float tanRight = std::tan(view.fov.angleRight);
+            const float tanUp = std::tan(view.fov.angleUp);
+            const float tanDown = std::tan(view.fov.angleDown);
+            const XrQuaternionf orientation = view.pose.orientation;
+            const XrVector3f offset = rotateVector(
+                orientation,
+                {kQuadDistanceM * 0.5f * (tanRight + tanLeft),
+                 kQuadDistanceM * 0.5f * (tanUp + tanDown), -kQuadDistanceM});
             quad.layerFlags = 0;
             quad.space = S.localSpace;
             quad.eyeVisibility = eye;
@@ -955,31 +989,22 @@ void renderFrame(AppState& S) {
             quad.subImage.imageRect.extent = {static_cast<int32_t>(eyeWidth),
                                                static_cast<int32_t>(S.cfg.height)};
             quad.subImage.imageArrayIndex = 0;
-            quad.pose.orientation.w = 1.0f;
-            quad.pose.position = {0.0f, 0.0f, -kQuadDistanceM};
-            quad.size = {kQuadHeightM * static_cast<float>(eyeWidth) /
-                             static_cast<float>(S.cfg.height),
-                         kQuadHeightM};
+            quad.pose.orientation = orientation;
+            quad.pose.position = {view.pose.position.x + offset.x,
+                                  view.pose.position.y + offset.y,
+                                  view.pose.position.z + offset.z};
+            quad.size = {kQuadDistanceM * (tanRight - tanLeft),
+                         kQuadDistanceM * (tanUp - tanDown)};
         };
         const bool stereoSbs = S.cfg.stereoSbs && S.cfg.width >= 2 && S.cfg.width % 2 == 0;
         if (stereoSbs) {
-            configureQuad(leftQuad, XR_EYE_VISIBILITY_LEFT, 0);
-            configureQuad(rightQuad, XR_EYE_VISIBILITY_RIGHT, eyeWidth);
+            configureQuad(leftQuad, XR_EYE_VISIBILITY_LEFT, 0, eyeViews[0]);
+            configureQuad(rightQuad, XR_EYE_VISIBILITY_RIGHT, eyeWidth, eyeViews[1]);
             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&leftQuad);
             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&rightQuad);
         } else {
-            configureQuad(leftQuad, XR_EYE_VISIBILITY_BOTH, 0);
+            configureQuad(leftQuad, XR_EYE_VISIBILITY_BOTH, 0, eyeViews[0]);
             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&leftQuad);
-        }
-        // Keep the waiting scene on top briefly so it warps away instead of cutting to the video.
-        const uint64_t now = kitvr::nowUs();
-        if (S.revealStartUs == 0) S.revealStartUs = now;
-        const float reveal = static_cast<float>(now - S.revealStartUs) /
-                             (WaitScene::kRevealSeconds * 1000000.0f);
-        if (reveal < 1.0f) {
-            const auto* scene = S.waitScene.render(S.session, S.localSpace, fs.predictedDisplayTime,
-                                                   WaitScene::Phase::Connected, reveal);
-            if (scene) layers[layerCount++] = scene;
         }
     }
 
