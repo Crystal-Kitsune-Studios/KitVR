@@ -51,9 +51,7 @@ jobs:
           if-no-files-found: error
 
   flatpak:
-    runs-on: ubuntu-24.04
-    env:
-      TMPDIR: /var/lib/flatpak
+    runs-on: ubuntu-24.04 
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
       options: --privileged
