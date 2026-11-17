@@ -64,6 +64,10 @@ jobs:
           flatpak remotes --system --show-details
           flatpak repair --system
 
+      - name: Remove preinstalled Flatpak refs
+        run: |
+          flatpak uninstall --system --all --assumeyes || true
+
       - name: Build the Flatpak
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
