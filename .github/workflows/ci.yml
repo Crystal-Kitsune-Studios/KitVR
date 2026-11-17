@@ -60,9 +60,9 @@ jobs:
 
       - name: Check Flatpak installation
         run: |
-        flatpak --version
-        flatpak remotes --system --show-details
-        flatpak repair --system
+          flatpak --version
+          flatpak remotes --system --show-details
+          flatpak repair --system
 
       - name: Build the Flatpak
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
