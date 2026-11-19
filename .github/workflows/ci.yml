@@ -51,30 +51,39 @@ jobs:
           if-no-files-found: error
 
   flatpak:
-    runs-on: ubuntu-24.04 
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
-      options: --privileged
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
-      - name: Check Flatpak installation
+      - name: Install Flatpak build tools
         run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder xvfb
           flatpak --version
-          flatpak remotes --system --show-details
-          flatpak repair --system
+          flatpak-builder --version
 
-      - name: Remove preinstalled Flatpak refs
-        run: |
-          flatpak uninstall --system --all --assumeyes || true
+      - name: Configure Flathub user installation
+        run: flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
       - name: Build the Flatpak
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        run: |
+          xvfb-run --auto-servernum flatpak-builder \
+            --user \
+            --repo=repo \
+            --disable-rofiles-fuse \
+            --install-deps-from=flathub \
+            --force-clean \
+            --default-branch=master \
+            --arch=x86_64 \
+            flatpak_app packaging/flatpak/com.crystalkitsune.KitVR.yaml
+          flatpak build-bundle repo KitVR-linux-x86_64.flatpak com.crystalkitsune.KitVR master
+
+      - name: Upload the Flatpak
+        uses: actions/upload-artifact@v4
         with:
-          bundle: KitVR-linux-x86_64.flatpak
-          manifest-path: packaging/flatpak/com.crystalkitsune.KitVR.yaml
-          cache-key: flatpak-${{ github.sha }}
-          artifact-name: kitvr-desktop-linux-flatpak
+          name: kitvr-desktop-linux-flatpak
+          path: KitVR-linux-x86_64.flatpak
+          if-no-files-found: error
 
   quest-apk:
     runs-on: ubuntu-24.04
