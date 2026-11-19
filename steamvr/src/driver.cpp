@@ -74,6 +74,28 @@ float readF32Le(const uint8_t* bytes) {
     return value;
 }
 
+HandState readHandState(const uint8_t* packet, size_t count, size_t handIndex) {
+    HandState hand{};
+    const size_t offset = handIndex == 0 ? 40 : 88;
+    hand.buttons = readU16Le(packet + offset);
+    const uint16_t flags = readU16Le(packet + offset + 2);
+    hand.active = (flags & 1) != 0;
+    hand.trigger = readF32Le(packet + offset + 4);
+    hand.grip = readF32Le(packet + offset + 8);
+    hand.stickX = readF32Le(packet + offset + 12);
+    hand.stickY = readF32Le(packet + offset + 16);
+    for (size_t i = 0; i < 7; ++i)
+        hand.pose[i] = readF32Le(packet + offset + 20 + i * sizeof(float));
+    hand.aimActive = count >= kTrackingPacketLength + 56 &&
+                     (packet[1] & 1) != 0 && (flags & 2) != 0;
+    if (hand.aimActive) {
+        const size_t aimOffset = kTrackingPacketLength + handIndex * 28;
+        for (size_t i = 0; i < 7; ++i)
+            hand.aimOffset[i] = readF32Le(packet + aimOffset + i * sizeof(float));
+    }
+    return hand;
+}
+
 vr::HmdMatrix34_t poseMatrix(const float* pose);
 
 class Hmd final : public vr::ITrackedDeviceServerDriver,
@@ -190,7 +212,9 @@ public:
                 }
             }
             if (!changed) return;
-            for (size_t eye = 0; eye < views.size(); ++eye) projections_[eye] = views[eye].projection;
+            for (size_t eye = 0; eye < views.size(); ++eye) {
+                projections_[eye] = kitvr::displayProjection(views[eye].projection);
+            }
             appliedViews_ = views;
             geometryApplied_ = true;
         }
@@ -210,7 +234,7 @@ public:
         }
         vr::HmdRect2_t rects[2]{};
         for (size_t eye = 0; eye < views.size(); ++eye) {
-            const auto& p = views[eye].projection;
+            const auto p = kitvr::displayProjection(views[eye].projection);
             rects[eye].vTopLeft.v[0] = p[0];
             rects[eye].vTopLeft.v[1] = p[2];
             rects[eye].vBottomRight.v[0] = p[1];
@@ -304,8 +328,8 @@ public:
                                            : vr::TrackedControllerRole_RightHand);
         properties->SetStringProperty(container, vr::Prop_ControllerType_String, "kitvr_touch");
         properties->SetStringProperty(container, vr::Prop_RenderModelName_String,
-                                      left_ ? "{oculus}/rendermodels/oculus_cv1_controller_left"
-                                            : "{oculus}/rendermodels/oculus_cv1_controller_right");
+                                      left_ ? "oculus_quest2_controller_left"
+                                            : "oculus_quest2_controller_right");
         properties->SetUint64Property(container, vr::Prop_SupportedButtons_Uint64,
                                       vr::ButtonMaskFromId(vr::k_EButton_ApplicationMenu) |
                                           vr::ButtonMaskFromId(vr::k_EButton_Grip) |
@@ -364,6 +388,8 @@ public:
         // The raw action pose is relative to the device pose already submitted to SteamVR.
         const vr::HmdMatrix34_t rawOffset{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
         input_->UpdatePoseComponent(poseComponent_, &rawOffset, timeOffset);
+        const auto aimOffset = hand.aimActive ? poseMatrix(hand.aimOffset) : rawOffset;
+        input_->UpdatePoseComponent(aimComponent_, &aimOffset, timeOffset);
     }
 
 private:
@@ -387,7 +413,8 @@ private:
             !makeScalar((root + "grip/value").c_str(), vr::VRScalarUnits_NormalizedOneSided, gripValue_) ||
             !makeScalar((root + "joystick/x").c_str(), vr::VRScalarUnits_NormalizedTwoSided, thumbstickX_) ||
             !makeScalar((root + "joystick/y").c_str(), vr::VRScalarUnits_NormalizedTwoSided, thumbstickY_) ||
-            input_->CreatePoseComponent(container, "/pose/raw", &poseComponent_) != vr::VRInputError_None) {
+            input_->CreatePoseComponent(container, "/pose/raw", &poseComponent_) != vr::VRInputError_None ||
+            input_->CreatePoseComponent(container, "/pose/aim", &aimComponent_) != vr::VRInputError_None) {
             return false;
         }
         return true;
@@ -409,6 +436,7 @@ private:
     vr::VRInputComponentHandle_t thumbstickX_ = vr::k_ulInvalidInputComponentHandle;
     vr::VRInputComponentHandle_t thumbstickY_ = vr::k_ulInvalidInputComponentHandle;
     vr::VRInputComponentHandle_t poseComponent_ = vr::k_ulInvalidInputComponentHandle;
+    vr::VRInputComponentHandle_t aimComponent_ = vr::k_ulInvalidInputComponentHandle;
 };
 
 class BodyTracker final : public vr::ITrackedDeviceServerDriver {
@@ -583,17 +611,8 @@ public:
                 std::copy(std::begin(parsed), std::end(parsed), std::begin(head));
                 gotPose = true;
                 for (size_t handIndex = 0; handIndex < hands.size(); ++handIndex) {
-                    const size_t offset = handIndex == 0 ? 40 : 88;
                     auto& hand = hands[handIndex];
-                    hand.buttons = readU16Le(packet.data() + offset);
-                    hand.active = (readU16Le(packet.data() + offset + 2) & 1) != 0;
-                    hand.trigger = readF32Le(packet.data() + offset + 4);
-                    hand.grip = readF32Le(packet.data() + offset + 8);
-                    hand.stickX = readF32Le(packet.data() + offset + 12);
-                    hand.stickY = readF32Le(packet.data() + offset + 16);
-                    for (size_t i = 0; i < 7; ++i) {
-                        hand.pose[i] = readF32Le(packet.data() + offset + 20 + i * sizeof(float));
-                    }
+                    hand = readHandState(packet.data(), static_cast<size_t>(count), handIndex);
                     const bool handValid = kitvr::validateHandState(hand);
                     if (!handValid && !invalidHandLogged_[handIndex]) {
                         if (auto* log = vr::VRDriverLog()) log->Log("KitVR: invalid controller tracking data");

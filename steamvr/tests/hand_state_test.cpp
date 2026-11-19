@@ -27,6 +27,13 @@ int main() {
     if (!hand.active || hand.buttons != 2 || hand.trigger != 1.0f || hand.stickX != -1.0f ||
         std::abs(hand.pose[6] - 1.0f) >= 1e-6f) return 3;
 
+    hand.aimActive = true;
+    hand.aimOffset[6] = 2.0f;
+    if (!kitvr::validateHandState(hand) || !hand.aimActive ||
+        std::abs(hand.aimOffset[6] - 1.0f) >= 1e-6f) return 8;
+    hand.aimOffset[0] = std::numeric_limits<float>::quiet_NaN();
+    if (!kitvr::validateHandState(hand) || hand.aimActive || !hand.active) return 9;
+
     hand.pose[6] = 0.0f;
     if (kitvr::validateHandState(hand)) return 4;
     if (hand.active || hand.buttons != 0 || hand.pose[6] != 1.0f) return 4;

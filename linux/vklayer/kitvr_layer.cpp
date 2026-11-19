@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdint>
@@ -36,6 +37,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -45,7 +47,7 @@
 namespace {
 
 constexpr uint32_t kMagic = 0x4B565246u;  // "KVRF"
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;
 constexpr size_t kHeaderBytes = 48;
 constexpr uint32_t kFormatBgra8 = 0;
 constexpr uint32_t kFormatRgba8 = 1;
@@ -100,9 +102,14 @@ public:
         if (directory == nullptr || directory[0] == '\0') directory = "/dev/shm";
         const std::string path = std::string(directory) + "/" + name;
 
-        const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0666);
+        const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0666);
         if (fd < 0) {
             logLine("cannot open %s", path.c_str());
+            return false;
+        }
+        if (::flock(fd, LOCK_EX) != 0) {
+            logLine("cannot lock %s for initialization: %s", path.c_str(), std::strerror(errno));
+            ::close(fd);
             return false;
         }
         // Never shrink the file: a reader that mapped the old size would fault on the missing tail.
@@ -117,12 +124,13 @@ public:
             return false;
         }
         void* mapping = ::mmap(nullptr, fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        ::close(fd);
         if (mapping == MAP_FAILED) {
             logLine("cannot map %s", path.c_str());
+            ::close(fd);
             return false;
         }
 
+        fd_ = fd;
         mapping_ = static_cast<uint8_t*>(mapping);
         size_ = fileSize;
         width_ = width;
@@ -139,14 +147,23 @@ public:
         const uint32_t payload32 = static_cast<uint32_t>(payload);
         std::memcpy(mapping_ + 24, &payload32, 4);
         std::memset(mapping_ + 28, 0, 4);
+        if (::flock(fd_, LOCK_UN) != 0) {
+            logLine("cannot unlock %s after initialization: %s", path.c_str(), std::strerror(errno));
+            close();
+            return false;
+        }
         logLine("publishing %ux%u stride %u to %s", width_, height_, stride_, path.c_str());
         return true;
     }
 
-    // Copies a frame and publishes it. frameId is bumped last with release semantics so a reader
-    // never sees a partially written frame with a fresh id.
     void publish(const void* pixels, size_t bytes) {
         if (mapping_ == nullptr) return;
+        if (::flock(fd_, LOCK_EX | LOCK_NB) != 0) {
+            if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                logLine("cannot lock frame ring for publish: %s", std::strerror(errno));
+            }
+            return;
+        }
         const size_t payload = static_cast<size_t>(stride_) * height_;
         std::memcpy(mapping_ + kHeaderBytes, pixels, std::min(bytes, payload));
         timespec now{};
@@ -156,17 +173,23 @@ public:
         std::memcpy(mapping_ + 40, &stamp, 8);
         auto* id = reinterpret_cast<uint64_t*>(mapping_ + 32);
         __atomic_add_fetch(id, 1ull, __ATOMIC_RELEASE);
+        if (::flock(fd_, LOCK_UN) != 0) {
+            logLine("cannot unlock frame ring after publish: %s", std::strerror(errno));
+        }
     }
 
 private:
     void close() {
         if (mapping_ == nullptr) return;
         ::munmap(mapping_, size_);
+        ::close(fd_);
         mapping_ = nullptr;
+        fd_ = -1;
         size_ = 0;
     }
 
     uint8_t* mapping_ = nullptr;
+    int fd_ = -1;
     size_t size_ = 0;
     uint32_t width_ = 0;
     uint32_t height_ = 0;

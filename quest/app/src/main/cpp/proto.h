@@ -9,7 +9,7 @@
 
 namespace kitvr {
 
-constexpr uint16_t kProtocolVersion = 1;
+constexpr uint16_t kProtocolVersion = 2;
 constexpr uint16_t kControlPort = 9943;  // TCP
 constexpr uint16_t kMediaPort = 9944;    // UDP
 
@@ -124,6 +124,8 @@ struct TrackingHand {
     float stickX = 0.0f;
     float stickY = 0.0f;
     float pose[7] = {0, 0, 0, 0, 0, 0, 1};
+    bool aimActive = false;
+    float aimOffset[7] = {0, 0, 0, 0, 0, 0, 1};
 };
 
 struct EyeViewConfig {
@@ -262,22 +264,24 @@ inline bool parseAudioDown(const uint8_t* d, size_t n, const uint8_t*& payload, 
 inline std::vector<uint8_t> encodeTracking(uint16_t seq, uint64_t tsUs, const float head[7],
                                            const TrackingHand& left, const TrackingHand& right) {
     std::vector<uint8_t> v;
-    v.reserve(kTrackingLen);
+    v.reserve(kTrackingLen + 56);
     v.push_back(kPacketTracking);
-    v.push_back(0);
+    v.push_back(1);  // Relative aim poses follow the original tracking packet.
     put16(v, seq);
     put64(v, tsUs);
     for (int i = 0; i < 7; i++) putF32(v, head[i]);
     for (const TrackingHand* hand : {&left, &right}) {
         put16(v, hand->buttons);
-        put16(v, hand->active ? 1 : 0);
+        put16(v, (hand->active ? 1 : 0) | (hand->aimActive ? 2 : 0));
         putF32(v, hand->trigger);
         putF32(v, hand->grip);
         putF32(v, hand->stickX);
         putF32(v, hand->stickY);
         for (float value : hand->pose) putF32(v, value);
     }
-    v.resize(kTrackingLen, 0);
+    for (const TrackingHand* hand : {&left, &right}) {
+        for (float value : hand->aimOffset) putF32(v, value);
+    }
     return v;
 }
 

@@ -2,6 +2,7 @@
 #include "../../quest/app/src/main/cpp/proto.h"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -30,6 +31,16 @@ int main() {
     if (!kitvr::parseViewConfig(packet.data(), packet.size(), views) ||
         views[0].eyeToHead[0] != -0.032f || views[1].eyeToHead[0] != 0.032f ||
         views[0].eyeToHead[6] != 1.0f || views[1].projection[2] != -0.9f) return 1;
+#if defined(__linux__)
+    // In the captured compositor frame, forward is at bottom / (bottom - top).
+    // It must land at the OpenXR quad's forward position: up / (up - down).
+    const std::array<float, 4> asymmetric{-1.0f, 1.0f, -0.5f, 1.5f};
+    const auto display = kitvr::displayProjection(asymmetric);
+    const float forward = display[3] / (display[3] - display[2]);
+    if (std::abs(forward - 0.25f) > 1e-6f) return 6;
+    const auto symmetric = kitvr::displayProjection({-1.0f, 1.0f, -1.0f, 1.0f});
+    if (symmetric[2] != -1.0f || symmetric[3] != 1.0f) return 7;
+#endif
     if (kitvr::parseViewConfig(packet.data(), packet.size() - 1, views)) return 2;
     putFloat(packet, 0, std::numeric_limits<float>::quiet_NaN());
     if (kitvr::parseViewConfig(packet.data(), packet.size(), views)) return 3;

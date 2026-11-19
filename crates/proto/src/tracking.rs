@@ -1,15 +1,17 @@
-//! Tracking packets, client to server over UDP. 136 bytes, little-endian.
+//! Tracking packets, client to server over UDP. The base packet is 136 bytes, little-endian.
 //!
 //!   0   u8   type (2)
-//!   1   u8   flags (0)
+//!   1   u8   flags (bit 0: relative aim-pose extension present)
 //!   2   u16  seq
 //!   4   u64  timestamp_us (client monotonic clock)
 //!   12  28B  head pose (position xyz, orientation xyzw, all f32)
 //!   40  48B  left hand block
 //!   88  48B  right hand block
 //!
-//! Hand block: u16 buttons, u16 flags (bit0 active), f32 trigger, f32 grip,
+//! Hand block: u16 buttons, u16 flags (bit 0 active, bit 1 aim pose valid), f32 trigger, f32 grip,
 //! f32 stick_x, f32 stick_y, then a 28 byte pose.
+//! When the extension flag is set, two 28-byte grip-relative aim poses follow at offsets 136 and
+//! 164. This module parses the base fields; the server forwards the full datagram to SteamVR.
 
 use crate::DecodeError;
 
@@ -214,6 +216,20 @@ mod tests {
         t.write_to(&mut buf);
         assert_eq!(buf.len(), TRACKING_LEN);
         assert_eq!(Tracking::parse(&buf).unwrap(), t);
+    }
+
+    #[test]
+    fn extended_tracking_keeps_base_fields_compatible() {
+        let tracking = Tracking {
+            left: Hand { active: true, ..Hand::default() },
+            ..Tracking::default()
+        };
+        let mut buf = Vec::new();
+        tracking.write_to(&mut buf);
+        buf[1] = 1;
+        buf[42] |= 2;
+        buf.extend_from_slice(&[0; 56]);
+        assert_eq!(Tracking::parse(&buf).unwrap(), tracking);
     }
 
     #[test]

@@ -13,6 +13,7 @@ Android app (Java launcher and C++ via the NDK) using OpenXR. One APK for Quest 
 4. If the server enables audio, PC audio plays through AAudio with a small jitter buffer, and
    the microphone is captured and sent back. Microphone permission is requested at runtime.
 5. Every frame, the head pose and active Touch-controller state are sent to the server over UDP.
+  Tracking uses floor-relative stage space when available, falling back to local space with a warning.
   If Touch controllers are not active, OpenXR hand tracking can map palm pose and pinch/grab to
   controller inputs. On runtimes that expose Meta's full-body joint set, selected body trackers
   are also sent to the SteamVR driver. The first head packet tells the server where to send video.
@@ -24,15 +25,22 @@ Android app (Java launcher and C++ via the NDK) using OpenXR. One APK for Quest 
   Optional waiting music plays quietly and fades out when that frame renders. Turn it off with
   **Music while connecting** in the launcher.
 
-If the headset session stops and resumes, the client reconnects the control channel so the server
-can learn the new UDP media address. An unresponsive control connection is retried after five
-seconds without incoming control traffic.
+The PC and Quest must use the same 64-character pairing key. The server prints the key when it is
+created; `kitvr-server --show-pairing-key` displays it again. Enter it in the launcher's **Pairing
+key from KitVR Desktop** field. The key is saved in app-private preferences on the Quest; treat it
+as a secret.
+
+If the headset session stops and resumes, the client reconnects the authenticated control channel so
+the server can learn the new UDP media address. An unresponsive control connection is retried after five
+seconds without incoming control traffic. A pending TCP connection is also retried after five
+seconds; stopping the session cancels the pending connection.
 
 For desktop mouse control, enable it explicitly on the PC and use the right hand or controller:
 move it to move the pointer, pinch or trigger for left-click, and grab or grip for right-click.
-Only enable this on a trusted network; the connection is not authenticated.
+Mouse control is accepted only over a paired, authenticated connection. Keep the pairing key private.
 Body tracking depends on headset and runtime support: a Quest 2 may not expose the body-tracking
 extension, and lower-body poses on supported headsets may be inferred rather than measured.
+If full-body tracker creation fails, KitVR tries the runtime's upper-body tracker instead.
 
 ```
 app/src/main/
@@ -69,14 +77,10 @@ The application id is `com.crystalkitsune.kitvr`. Change it in `app/build.gradle
 
 1. Enable developer mode on the headset and connect adb (`adb connect <quest-ip>:5555`).
 2. Install: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
-3. Start streaming in KitVR Desktop on the PC. Launch KitVR from the Quest library and select
-  **Find PCs** to discover your server over Wi-Fi, or enter
-  its IP address manually. Select **Connect**; the address is saved for the next launch. You can
-  also launch the immersive client directly with an extra:
-  `adb shell am start -n com.crystalkitsune.kitvr/.KitVrActivity --es host 192.168.1.50`
-  For direct native launches without an extra, put the address in a file:
-  `adb shell mkdir -p /sdcard/Android/data/com.crystalkitsune.kitvr/files`
-  `adb shell "echo 192.168.1.50 > /sdcard/Android/data/com.crystalkitsune.kitvr/files/host.txt"`
+3. Start streaming in KitVR Desktop on the PC, then launch KitVR from the Quest library.
+  Select **Find PCs** or enter the PC address, enter the pairing key, and select **Connect**.
+  For direct native debugging, include the Quest VR intent and both required extras:
+  `adb shell am start -a android.intent.action.MAIN -c com.oculus.intent.category.VR -n com.crystalkitsune.kitvr/.KitVrActivity --es host 192.168.1.50 --es pairing_key PAIRING_KEY`
 4. Logs: `adb logcat -s kitvr`
 
 The launcher checks the latest stable GitHub release on startup. When an update is available, choose
@@ -94,7 +98,11 @@ The client has been tested on Quest 2; device-specific issues may still occur.
 - **Manifest values.** `com.oculus.supportedDevices` is `quest2|questpro|quest3|quest3s`. If the
   headset refuses to launch the app in VR mode, check this value against Meta's current docs.
 - **Black screen but logs show frames.** Confirm the state reached VISIBLE or FOCUSED
-  (`session state 4` or `5` in the log) and that `video ready` was logged.
+  (`OpenXR session state: VISIBLE` or `FOCUSED` in the log) and that `video ready` was logged.
+- **No media address or video.** Check that the headset display is awake and the headset is worn.
+  If needed, wake it with `adb shell input keyevent KEYCODE_WAKEUP`. An IDLE session cannot send
+  tracking; confirm the log advances through READY to VISIBLE or FOCUSED. The first valid
+  tracking packet establishes the server's UDP media address.
 - **Decoder errors.** Some devices need the `vendor.qti-ext-dec-low-latency.enable` format key.
   Try removing `low-latency` and `operating-rate` in `decoder.cpp` to rule them out.
 - **No microphone.** The permission prompt is raised from a native thread through JNI, which

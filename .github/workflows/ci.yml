@@ -81,6 +81,26 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Test Quest native components
+        run: |
+          g++ -std=c++17 -Iquest/app/src/main/cpp \
+            quest/tests/body_tracker_test.cpp -o /tmp/kitvr-body-tracker-test
+          g++ -std=c++17 -Iquest/tests/stubs -Iquest/app/src/main/cpp \
+            quest/tests/hand_input_test.cpp -o /tmp/kitvr-hand-input-test
+          g++ -std=c++17 -pthread -Iquest/tests/stubs -Iquest/app/src/main/cpp \
+            quest/tests/decoder_output_test.cpp quest/app/src/main/cpp/decoder.cpp \
+            -o /tmp/kitvr-decoder-output-test
+          g++ -std=c++17 -Iquest/app/src/main/cpp quest/tests/control_send_test.cpp \
+            -o /tmp/kitvr-control-send-test
+          g++ -std=c++17 -pthread -Iquest/tests/stubs -Iquest/app/src/main/cpp \
+            quest/tests/session_reconnect_test.cpp quest/app/src/main/cpp/session.cpp \
+            -Wl,--wrap=send -Wl,--wrap=connect -Wl,--wrap=poll -o /tmp/kitvr-session-reconnect-test
+          /tmp/kitvr-body-tracker-test
+          /tmp/kitvr-hand-input-test
+          /tmp/kitvr-decoder-output-test
+          /tmp/kitvr-control-send-test
+          /tmp/kitvr-session-reconnect-test
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -160,6 +180,7 @@ jobs:
           New-Item -ItemType Directory -Force package | Out-Null
           Copy-Item target/release/kitvr-desktop.exe package/
           Copy-Item target/release/kitvr-server.exe package/
+          Copy-Item target/release/kitvr-mascot.exe package/
           Copy-Item target/release/kitvr-updater.exe package/
           Copy-Item README.md package/
           Compress-Archive -Path package/* -DestinationPath KitVR-windows-x86_64.zip
@@ -169,13 +190,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps AppDir/usr/share/doc/kitvr
-          cp target/release/kitvr-desktop target/release/kitvr-server target/release/kitvr-updater AppDir/usr/bin/
+          cp target/release/kitvr-desktop target/release/kitvr-server target/release/kitvr-updater target/release/kitvr-mascot AppDir/usr/bin/
           cp README.md AppDir/usr/share/doc/kitvr/
           cp packaging/kitvr.desktop AppDir/usr/share/applications/
           rsvg-convert -w 256 -h 256 packaging/kitvr.svg -o AppDir/usr/share/icons/hicolor/256x256/apps/kitvr.png
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O linuxdeploy.AppImage
           chmod +x linuxdeploy.AppImage
-          ./linuxdeploy.AppImage --appimage-extract-and-run --appdir AppDir --desktop-file AppDir/usr/share/applications/kitvr.desktop --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/kitvr.png --executable AppDir/usr/bin/kitvr-desktop --executable AppDir/usr/bin/kitvr-server --executable AppDir/usr/bin/kitvr-updater --output appimage
+          ./linuxdeploy.AppImage --appimage-extract-and-run --appdir AppDir --desktop-file AppDir/usr/share/applications/kitvr.desktop --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/kitvr.png --executable AppDir/usr/bin/kitvr-desktop --executable AppDir/usr/bin/kitvr-server --executable AppDir/usr/bin/kitvr-updater --executable AppDir/usr/bin/kitvr-mascot --output appimage
           mv KitVR-x86_64.AppImage KitVR-linux-x86_64.AppImage
           tar -C steamvr/package -czf KitVR-steamvr-driver-linux-x86_64.tar.gz kitvr
 
@@ -190,7 +211,7 @@ jobs:
 
   release-apk:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [desktop-package, vklayer, flatpak]
+    needs: [rust, quest-apk, desktop-package, vklayer, flatpak]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -14,11 +14,16 @@ This table will be updated once stable versions exist.
 
 ## Known Limitations
 
-Protocol version 1 has no authentication or encryption on the control or media
-channels. Anyone on the same network can connect to a running server. Until PIN pairing
-and encrypted media land (see `docs/PROTOCOL.md`), run KitVR only on a trusted LAN and do
-not expose its ports (TCP 9943, UDP 9944) to the internet. Reports about this specific
-limitation are already tracked, so there is no need to submit them as new vulnerabilities.
+Previously released protocol-v1 builds do not authenticate or encrypt control or media
+traffic. Anyone on the same network can connect to those servers. Do not expose their ports
+(TCP 9943, UDP 9944) to the internet.
+
+The current development protocol (v2) requires a 32-byte pairing key and uses HMAC-SHA-256
+for authentication, HKDF-SHA-256 for session keys, and AES-256-GCM for control and media
+traffic. Protocol-v1 clients are rejected without an insecure fallback. The implementation
+is not yet released. Encrypted control, tracking, and video were verified end to end on a
+Quest 2; audio and body-tracking media have not been verified. Discovery metadata and packet
+timing and sizes remain visible. See `docs/PROTOCOL.md` for key storage and protocol details.
 
 ## Reporting a Vulnerability
 

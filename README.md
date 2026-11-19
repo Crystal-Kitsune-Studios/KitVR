@@ -28,7 +28,9 @@ You need Rust, ffmpeg on your PATH, and a Quest with developer mode enabled.
    ```
 
    This streams ffmpeg's test pattern with software HEVC encoding, so it works on any machine.
-   Set `KITVR_FFMPEG` if ffmpeg is not on PATH.
+   Set `KITVR_FFMPEG` if ffmpeg is not on PATH. On first run, the server creates a pairing key
+   and prints it; enter that 64-character key in the Quest launcher. Keep it private. To display
+   it again, run `kitvr-server --show-pairing-key`.
 
 2. Build and install the Quest app, launch it, and select **Find PCs** to discover the server.
   You can still enter the PC's IP address manually. See [quest/README.md](quest/README.md).
@@ -47,6 +49,8 @@ You need Rust, ffmpeg on your PATH, and a Quest with developer mode enabled.
    `videoconvert`, `videoscale`, `videorate`, `queue`, and `fdsink` plugins.
    If desktop detail breaks up at low bitrates, try a higher bitrate (for example
    `--bitrate-kbps 20000` at 1280x720) if your network can sustain it.
+   The default is 20000 kbps. If the Quest reports repeated lost frames, lower the bitrate;
+   a 12000 kbps setting streamed without further loss in a Quest 2 test.
    Width and height must be even, nonzero 16-bit values; fps, bitrate and GOP must be positive.
 
     A side-by-side stereo video file can be shown with one half per eye:
@@ -55,7 +59,8 @@ You need Rust, ffmpeg on your PATH, and a Quest with developer mode enabled.
     cargo run -p kitvr-server --release -- --source file:stereo.mp4 --width 3664 --height 1920 --stereo-sbs
     ```
 
-    `--width` is the combined image width. This does not yet capture live SteamVR frames.
+    `--width` is the combined image width. For SteamVR capture, see the driver and Linux
+    instructions below.
 
 ### Optional desktop app
 
@@ -71,14 +76,37 @@ server output. FFmpeg must be installed and available on `PATH` (or set `KITVR_F
 existing `kitvr-server` command-line workflow remains available without the GUI. Stream choices are
 saved between launches. On first launch, the app walks through PC setup, network requirements, and
 connecting from the Quest; open **Tutorial** in the header to revisit it.
+Open **Themes** to choose a preset or customize desktop background, panel, text, and accent colors.
+The selection and custom colors are saved between launches; they do not change the Quest display.
+Choose **SteamVR** to stream a side-by-side SteamVR capture; start SteamVR with the KitVR
+capture layer or driver first. The captured image must actually contain both eyes.
 
 Mouse control is opt-in: enable **hand/controller mouse** in the desktop app or pass
 `--enable-mouse` to the server. Move your right hand or controller to move the pointer;
 pinch or pull the trigger to left-click, and close your hand or squeeze the grip to right-click.
 Linux requires a desktop portal with RemoteDesktop pointer support and its permission dialog.
 Mouse control resets when tracking is lost or the client disconnects.
-**KitVR connections are not authenticated or encrypted: enable mouse control only on a trusted network.**
+Connections require the Quest pairing key and use authenticated encryption. Keep the key private;
+discovery metadata and network traffic timing and sizes remain visible.
 The option is off at every desktop app launch.
+
+### Desktop avatar
+
+Choose **Open desktop avatar** in KitVR Desktop and drop in a VRM 0.x or 1.0 file you have
+permission to use. VRChat does not expose an avatar's model through OSC; an avatar available only
+inside VRChat cannot be imported directly. Enable **Send tracking to desktop avatar** before
+starting the server (or pass `--avatar-tracking`). The left stick moves the character along the
+desktop; head and hand poses drive an approximate animation. On hardware that supplies body
+tracking, valid hips, knees and ankles also drive the legs. Quest 2 has not reported full-body
+tracking support. Tracking stops after packets time out.
+
+The avatar's menu button offers an application list on Linux outside Flatpak; enable
+hand/controller mouse to operate the menu from the headset. The current menu cannot launch host
+applications from Flatpak and is not yet available on Windows. The avatar uses X11/XWayland on
+Linux; desktop policies can prevent overlay positioning or click-through. This is a separate
+desktop VRM character, not a direct rendering of the VRChat avatar. Tracking forwarded over
+loopback can be read by local processes; enable avatar tracking only when those local processes
+are trusted.
 
 The desktop app checks GitHub Releases on startup and offers the latest platform package when it
 finds a newer version. Choose **Get update** to download and apply it; the app stops its stream and
@@ -92,7 +120,8 @@ tools and plugins required for Wayland capture.
 SteamVR builds also publish a separate `KitVR-steamvr-driver-windows-x86_64.zip` or
 `KitVR-steamvr-driver-linux-x86_64.tar.gz`. This experimental HMD driver registers the headset and
 forwards Quest head/controller poses and basic controller input into SteamVR over loopback UDP
-port 9945. On Windows it also captures SteamVR's composited frames for
+port 9945. Its controller visual defaults to SteamVR's Quest 2 model; the headset model is not
+currently detected. On Windows it also captures SteamVR's composited frames for
 `kitvr-server --source steamvr --stereo-sbs`; see [steamvr/README.md](steamvr/README.md).
 
 Build the tracking prototype locally with CMake 3.22 or newer:
@@ -178,7 +207,7 @@ Replacing the bridge with the native backends in `crates/server/src/platform/` r
 | Controller and hand input | basic controller emulation and opt-in mouse control |
 | SteamVR frames on Linux (Vulkan layer, virtual display) | streams the SteamVR compositor end to end; headset untested |
 | SteamVR frames on Windows (driver virtual display) | implemented, untested on Windows |
-| Authentication and encryption | not started |
+| Authentication and encryption | protocol v2 pairing and encrypted control/media implemented; Quest 2 tracking and video verified live |
 
 SteamVR streaming and body tracking remain experimental and depend on runtime and hardware support.
 

@@ -105,8 +105,10 @@ public final class MainActivity extends Activity {
     private TextView updateAction;
     private LinearLayout updateCard;
     private EditText hostInput;
+    private EditText pairingKeyInput;
     private Toggle musicToggle;
     private String selectedHost;
+    private String pendingPairingKey;
     private String updateUrl;
     private NsdManager nsdManager;
     private NsdManager.DiscoveryListener discoveryListener;
@@ -180,6 +182,9 @@ public final class MainActivity extends Activity {
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         panel.addView(header);
         panel.addView(divider(), margins(ViewGroup.LayoutParams.MATCH_PARENT, 1, 14, 0));
+        panel.addView(text("Pair with the 64-character key from your PC. Keep this key private.",
+                11.5f, AMBER, false), margins(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 12, 0));
 
         LinearLayout networkHead = sectionHeader("On your network");
         findButton = text("Find PCs", 11.5f, COOL, true);
@@ -232,6 +237,23 @@ public final class MainActivity extends Activity {
         addParams.leftMargin = dp(8);
         manual.addView(addButton, addParams);
         panel.addView(manual);
+
+        panel.addView(text("Pairing key from KitVR Desktop", 11.5f, MUTED, false),
+                margins(ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 12, 4));
+        pairingKeyInput = new EditText(this);
+        pairingKeyInput.setSingleLine(true);
+        pairingKeyInput.setHint("64 hexadecimal characters");
+        pairingKeyInput.setTextColor(TEXT);
+        pairingKeyInput.setHintTextColor(DIM);
+        pairingKeyInput.setTextSize(13.5f);
+        pairingKeyInput.setTypeface(Typeface.MONOSPACE);
+        pairingKeyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        pairingKeyInput.setPadding(dp(12), 0, dp(12), 0);
+        pairingKeyInput.setBackground(box(RAISED, LINE, 9, 1));
+        pairingKeyInput.setText(getPreferences(MODE_PRIVATE)
+                .getString(pairingKeyPreferenceKey(selectedHost), ""));
+        panel.addView(pairingKeyInput, margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), 0, 0));
 
         panel.addView(sectionHeader("Options"), margins(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 18, 10));
@@ -366,6 +388,8 @@ public final class MainActivity extends Activity {
         knownHosts.add(host);
         selectedHost = host;
         saveSavedPcs();
+        pairingKeyInput.setText(getPreferences(MODE_PRIVATE)
+                .getString(pairingKeyPreferenceKey(host), ""));
         hostInput.setText("");
         hostInput.clearFocus();
         ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE))
@@ -422,6 +446,8 @@ public final class MainActivity extends Activity {
         row.setOnClickListener(v -> {
             selectedHost = pc.host;
             getPreferences(MODE_PRIVATE).edit().putString("host", pc.host).apply();
+            pairingKeyInput.setText(getPreferences(MODE_PRIVATE)
+                    .getString(pairingKeyPreferenceKey(pc.host), ""));
             renderPcs();
             setStatus("Selected " + pc.name + ".", false);
         });
@@ -445,7 +471,16 @@ public final class MainActivity extends Activity {
             return;
         }
         String host = selectedHost;
+        String pairingKey = pairingKeyInput.getText().toString().trim().toLowerCase(Locale.ROOT);
+        if (!pairingKey.matches("[0-9a-f]{64}")) {
+            pairingKeyInput.setError("Enter the 64-character key shown by KitVR Desktop");
+            setStatus("Pair this Quest using the key shown in KitVR Desktop before connecting.", true);
+            return;
+        }
         getPreferences(MODE_PRIVATE).edit().putString("host", host).apply();
+        getPreferences(MODE_PRIVATE).edit()
+                .putString(pairingKeyPreferenceKey(host), pairingKey)
+                .apply();
         ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE))
                 .hideSoftInputFromWindow(hostInput.getWindowToken(), 0);
         ArrayList<String> missingPermissions = new ArrayList<>();
@@ -457,18 +492,20 @@ public final class MainActivity extends Activity {
         }
         if (!missingPermissions.isEmpty()) {
             pendingHost = host;
+            pendingPairingKey = pairingKey;
             setStatus("Allow optional hand and body tracking, or deny and keep using controllers.",
                     false);
             requestPermissions(missingPermissions.toArray(new String[0]), REQUEST_TRACKING_PERMISSIONS);
             return;
         }
-        launchNative(host);
+        launchNative(host, pairingKey);
     }
 
-    private void launchNative(String host) {
-        setStatus("Starting KitVR. Make sure the server is running on " + host + ".", false);
+    private void launchNative(String host, String pairingKey) {
+        setStatus("Starting an encrypted KitVR session with " + host + ".", false);
         Intent intent = new Intent(this, KitVrActivity.class);
         intent.putExtra("host", host);
+        intent.putExtra("pairing_key", pairingKey);
         intent.putExtra("waiting_music", getPreferences(MODE_PRIVATE).getBoolean("waiting_music", true));
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
@@ -483,9 +520,15 @@ public final class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_TRACKING_PERMISSIONS && pendingHost != null) {
             String host = pendingHost;
+            String pairingKey = pendingPairingKey;
             pendingHost = null;
-            launchNative(host);
+            pendingPairingKey = null;
+            if (pairingKey != null) launchNative(host, pairingKey);
         }
+    }
+
+    private static String pairingKeyPreferenceKey(String host) {
+        return "pairing_key:" + (host == null ? "" : host);
     }
 
     private void discoverServers() {

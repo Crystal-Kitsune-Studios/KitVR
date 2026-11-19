@@ -2,6 +2,7 @@
 #pragma once
 #include <android/native_window.h>
 
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <optional>
@@ -12,6 +13,9 @@
 #include "audio.h"
 #include "decoder.h"
 #include "proto.h"
+#ifdef __ANDROID__
+#include "secure_channel.h"
+#endif
 
 namespace kitvr {
 
@@ -23,7 +27,12 @@ public:
     Session& operator=(const Session&) = delete;
 
     // Connects (and keeps reconnecting) to the server's control port on a background thread.
+#ifndef __ANDROID__
     void startControl(const std::string& host);
+#else
+    void startControl(const std::string& host, const std::string& pairingKeyHex,
+                      JavaVM* vm, jobject activity);
+#endif
 
     // True once for each StreamConfig received from the server.
     bool takeConfig(StreamConfig& out, uint32_t& epoch);
@@ -56,6 +65,7 @@ private:
     void mediaLoop();
     bool handleMessage(const Message& m);  // false means close the connection
     void sendControl(const std::vector<uint8_t>& data);
+    void sendMediaPacket(const std::vector<uint8_t>& data);
 
     std::string host_;
     std::atomic<bool> running_{false};
@@ -81,6 +91,15 @@ private:
     VideoDecoder decoder_;
     std::atomic<uint16_t> trackSeq_{0};
     std::atomic<uint16_t> bodySeq_{0};
+    std::atomic<uint64_t> mediaSendSeq_{0};
+    uint64_t controlSendSeq_ = 0;  // guarded by sendMutex_
+    bool secureEnabled_ = false;   // guarded by sendMutex_
+#ifdef __ANDROID__
+    std::array<uint8_t, 32> pairingKey_{};
+    JavaVM* javaVm_ = nullptr;
+    jobject activity_ = nullptr;  // global reference, kept until the control thread exits
+    SecureChannel secureChannel_;
+#endif
 
     Audio audio_;
     std::atomic<bool> micAllowed_{false};

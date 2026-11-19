@@ -3,12 +3,15 @@
 
 pub mod audio;
 pub mod control;
+pub mod crypto;
 pub mod tracking;
 pub mod video;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const CONTROL_PORT: u16 = 9943; // TCP
 pub const MEDIA_PORT: u16 = 9944; // UDP
+/// Optional local-only tracking feed for the desktop avatar.
+pub const AVATAR_TRACKING_PORT: u16 = 9946; // UDP loopback
 /// Payload bytes per UDP packet, excluding our header. Keeps packets under a 1500 MTU.
 pub const MAX_PACKET_PAYLOAD: usize = 1200;
 

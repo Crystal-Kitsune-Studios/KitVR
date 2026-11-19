@@ -10,9 +10,11 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod apps;
 mod platform;
 mod pose;
 mod render;
+mod tracking;
 mod vrm;
 
 use std::collections::HashMap;
@@ -38,7 +40,7 @@ const STORAGE_WANDER: &str = "wander";
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum State {
     Idle { until: f32 },
-    Walk { target_x: f32 },
+    Walk { target_x: f32, controlled: bool },
     Sit { until: f32 },
     Falling,
     /// Left button held on the avatar; becomes a drag once the cursor moves.
@@ -70,6 +72,13 @@ struct MascotApp {
     velocity: Vec2,
     passthrough: bool,
     menu: Option<Pos2>,
+    applications: Option<Vec<apps::Application>>,
+    app_search: String,
+    app_results_tx: std::sync::mpsc::Sender<String>,
+    app_results_rx: std::sync::mpsc::Receiver<String>,
+    tracking: Option<tracking::Feed>,
+    tracking_error: Option<String>,
+    was_tracking: bool,
 
     start: Instant,
     last_frame: Instant,
@@ -90,6 +99,15 @@ impl MascotApp {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0x9E37_79B9, |d| d.as_nanos() as u64)
             | 1;
+        let (tracking, tracking_error) = match tracking::Feed::bind() {
+            Ok(feed) => (Some(feed), None),
+            Err(error) => {
+                let message = format!("Desktop avatar tracking unavailable: {error}");
+                eprintln!("kitvr-mascot: {message}");
+                (None, Some(message))
+            }
+        };
+        let (app_results_tx, app_results_rx) = std::sync::mpsc::channel();
         let mut app = Self {
             scene: Arc::new(Mutex::new(render::Scene::default())),
             desktop: platform::Desktop::new(),
@@ -103,6 +121,13 @@ impl MascotApp {
             velocity: Vec2::ZERO,
             passthrough: false,
             menu: None,
+            applications: None,
+            app_search: String::new(),
+            app_results_tx,
+            app_results_rx,
+            tracking,
+            tracking_error,
+            was_tracking: false,
             start: Instant::now(),
             last_frame: Instant::now(),
             rng: seed,
@@ -174,12 +199,27 @@ impl MascotApp {
         egui::Rect::from_min_size(Pos2::ZERO, monitor)
     }
 
-    fn step(&mut self, ctx: &egui::Context, now: f32, dt: f32, cursor: Option<(Pos2, bool)>, hit: bool) {
+    fn step(&mut self, ctx: &egui::Context, now: f32, dt: f32, cursor: Option<(Pos2, bool)>,
+            hit: bool, tracking: Option<&kitvr_proto::tracking::Tracking>) {
         let work = self.work_area(ctx);
         let ground = work.max.y - SIZE.y;
         let min_x = work.min.x - SIZE.x * 0.25;
         let max_x = work.max.x - SIZE.x * 0.75;
         let mut position = self.position.unwrap_or(pos2(max_x - 60.0, ground));
+
+        if matches!(self.state, State::Idle { .. } | State::Walk { .. } | State::Sit { .. }) {
+            if let Some(packet) = tracking {
+                let stick = if packet.left.active { packet.left.stick[0] } else { 0.0 };
+                self.state = if stick.abs() > 0.2 {
+                    State::Walk { target_x: if stick < 0.0 { min_x } else { max_x }, controlled: true }
+                } else {
+                    State::Idle { until: f32::INFINITY }
+                };
+            } else if self.was_tracking {
+                self.state = State::Idle { until: now + 1.0 };
+            }
+        }
+        self.was_tracking = tracking.is_some();
 
         let (pressed, secondary) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.secondary_pressed()));
         let local_pointer = ctx.input(|i| i.pointer.interact_pos());
@@ -242,7 +282,7 @@ impl MascotApp {
                     let roll = self.random();
                     self.state = if self.wander && roll < 0.55 {
                         let span = (max_x - min_x).max(1.0);
-                        State::Walk { target_x: min_x + span * self.random() }
+                        State::Walk { target_x: min_x + span * self.random(), controlled: false }
                     } else if roll < 0.8 {
                         let length = 5.0 + 8.0 * self.random();
                         State::Sit { until: now + length }
@@ -252,13 +292,13 @@ impl MascotApp {
                     };
                 }
             }
-            State::Walk { target_x } => {
+            State::Walk { target_x, controlled } => {
                 let delta = target_x - position.x;
                 // Wait for the body to turn before setting off.
                 if self.motion.body_yaw.abs() > 0.8 {
                     let step = WALK_SPEED * dt * delta.signum();
-                    if delta.abs() <= step.abs() || !self.wander {
-                        position.x = if self.wander { target_x } else { position.x };
+                    if delta.abs() <= step.abs() || (!controlled && !self.wander) {
+                        position.x = if controlled || self.wander { target_x } else { position.x };
                         let rest = 1.5 + 3.0 * self.random();
                         self.state = State::Idle { until: now + rest };
                     } else {
@@ -292,7 +332,7 @@ impl MascotApp {
             *value += (target - *value) * (1.0 - (-rate * dt).exp());
         };
         let walking = match self.state {
-            State::Walk { target_x } => Some((target_x - position.x).signum()),
+            State::Walk { target_x, .. } => Some((target_x - position.x).signum()),
             _ => None,
         };
         let dragged = matches!(self.state, State::Dragged { .. });
@@ -351,11 +391,47 @@ impl MascotApp {
         let Some(at) = self.menu else { return };
         let mut close = false;
         let response = egui::Area::new(egui::Id::new("mascot-menu"))
-            .fixed_pos(pos2(at.x.min(SIZE.x - 170.0).max(0.0), at.y.min(SIZE.y - 150.0).max(0.0)))
+            .fixed_pos(pos2(at.x.min(SIZE.x - 220.0).max(0.0), at.y.min(SIZE.y - 300.0).max(0.0)))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_width(150.0);
+                    ui.set_width(200.0);
+                    if let Some(applications) = &self.applications {
+                        if ui.button("Back").clicked() {
+                            self.applications = None;
+                        } else {
+                            ui.add(egui::TextEdit::singleline(&mut self.app_search).hint_text("Search applications"));
+                            let search = self.app_search.to_lowercase();
+                            egui::ScrollArea::vertical().max_height(190.0).show(ui, |ui| {
+                                for app in applications.iter().filter(|app| app.name.to_lowercase().contains(&search)) {
+                                    if ui.button(&app.name).clicked() {
+                                        let app = app.clone();
+                                        let tx = self.app_results_tx.clone();
+                                        std::thread::spawn(move || {
+                                            if let Err(error) = apps::launch(&app) {
+                                                let _ = tx.send(error.to_string());
+                                            }
+                                        });
+                                        close = true;
+                                    }
+                                }
+                            });
+                        }
+                        return;
+                    }
+                    if ui.button("Applications").clicked() {
+                        match apps::list() {
+                            Ok(apps) => {
+                                self.applications = Some(apps);
+                                self.app_search.clear();
+                            }
+                            Err(error) => {
+                                let message = format!("Could not list applications: {error}");
+                                eprintln!("kitvr-mascot: {message}");
+                                self.message = Some(message);
+                            }
+                        }
+                    }
                     if ui.checkbox(&mut self.wander, "Wander around").changed() {
                         close = true;
                     }
@@ -376,13 +452,19 @@ impl MascotApp {
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
+                    if let Some(message) = &self.message {
+                        ui.colored_label(egui::Color32::LIGHT_RED, message);
+                    }
                 });
             })
             .response;
         let clicked_elsewhere = ctx.input(|i| i.pointer.any_pressed())
-            && !ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| response.rect.contains(p));
+            && !ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| {
+                response.rect.contains(p) || (p.x >= SIZE.x - 42.0 && p.y < 38.0)
+            });
         if close || clicked_elsewhere || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.menu = None;
+            self.applications = None;
         }
     }
 
@@ -436,6 +518,11 @@ impl eframe::App for MascotApp {
         self.last_frame = now_instant;
         let now = self.start.elapsed().as_secs_f32();
         ctx.request_repaint_after(Duration::from_millis(16));
+        if let Ok(error) = self.app_results_rx.try_recv() {
+            eprintln!("kitvr-mascot: {error}");
+            self.message = Some(error);
+            self.menu = Some(pos2(0.0, 0.0));
+        }
 
         let dropped: Option<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone()));
         if let Some(path) = dropped {
@@ -471,8 +558,27 @@ impl eframe::App for MascotApp {
             .as_ref()
             .and_then(|d| d.cursor())
             .map(|c| (pos2(c.x / ppp, c.y / ppp), c.left_down));
+        let position = self.position.unwrap_or(Pos2::ZERO);
+        let menu_hit = cursor.is_some_and(|(cursor, _)| {
+            let local = cursor - position.to_vec2();
+            (SIZE.x - 42.0..SIZE.x).contains(&local.x) && (0.0..38.0).contains(&local.y)
+        });
         let hit = self.scene.lock().unwrap().hit;
-        self.step(ctx, now, dt, cursor, hit);
+        let tracking = if let Some(feed) = &mut self.tracking {
+            match feed.poll(now_instant) {
+                Ok(packet) => packet,
+                Err(error) => {
+                    let message = format!("Desktop avatar tracking stopped: {error}");
+                    eprintln!("kitvr-mascot: {message}");
+                    self.tracking_error = Some(message);
+                    self.tracking = None;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        self.step(ctx, now, dt, cursor, hit && !menu_hit, tracking.as_ref().map(|frame| &frame.tracking));
 
         let position = self.position.unwrap_or(Pos2::ZERO);
         if self.sent_position.map_or(true, |sent| (sent - position).length() > 0.4) {
@@ -482,7 +588,11 @@ impl eframe::App for MascotApp {
 
         // Pose the avatar and hand it to the paint callback.
         let avatar = self.avatar.as_ref().unwrap();
-        let world = avatar.skeleton.pose(&avatar.model, &pose::build(&self.motion));
+        let mut pose = pose::build(&self.motion);
+        if let Some(packet) = &tracking {
+            tracking::apply_pose(&mut pose, packet);
+        }
+        let world = avatar.skeleton.pose(&avatar.model, &pose);
         let local_cursor = cursor.map(|(c, _)| c - position.to_vec2());
         let probe = local_cursor
             .filter(|c| c.x >= 0.0 && c.y >= 0.0 && c.x < SIZE.x && c.y < SIZE.y)
@@ -508,10 +618,30 @@ impl eframe::App for MascotApp {
             });
             ui.painter().add(egui::PaintCallback { rect, callback: Arc::new(callback) });
         });
+        egui::Area::new(egui::Id::new("mascot-menu-button"))
+            .fixed_pos(pos2(SIZE.x - 40.0, 4.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                if ui.button("☰").on_hover_text("Avatar menu").clicked() {
+                    if self.menu.is_some() {
+                        self.menu = None;
+                        self.applications = None;
+                    } else {
+                        self.menu = Some(pos2(0.0, 40.0));
+                    }
+                }
+            });
         self.menu_ui(ctx);
+        if let Some(error) = &self.tracking_error {
+            egui::Area::new(egui::Id::new("tracking-error"))
+                .fixed_pos(pos2(5.0, 5.0))
+                .show(ctx, |ui| {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                });
+        }
 
         // Only the avatar (and the menu) catch the mouse; the rest of the window lets clicks through.
-        let busy = self.menu.is_some() || matches!(self.state, State::Pressed { .. } | State::Dragged { .. });
+        let busy = menu_hit || self.menu.is_some() || matches!(self.state, State::Pressed { .. } | State::Dragged { .. });
         let want_passthrough = !(hit || busy) && self.desktop.is_some();
         if want_passthrough != self.passthrough {
             ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(want_passthrough));

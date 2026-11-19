@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "body_tracker.h"
 #include "log.h"
 #include "session.h"
 #include "hand_input.h"
@@ -77,6 +78,7 @@ struct SystemPropertiesFullBodyMETACompat {
 
 struct HandActions {
     XrAction pose = XR_NULL_HANDLE;
+    XrAction aim = XR_NULL_HANDLE;
     XrAction trigger = XR_NULL_HANDLE;
     XrAction squeeze = XR_NULL_HANDLE;
     XrAction thumbstick = XR_NULL_HANDLE;
@@ -94,10 +96,12 @@ struct AppState {
     XrSession session = XR_NULL_HANDLE;
     XrSpace localSpace = XR_NULL_HANDLE;
     XrSpace viewSpace = XR_NULL_HANDLE;
+    XrSpace trackingSpace = XR_NULL_HANDLE;
     XrActionSet actionSet = XR_NULL_HANDLE;
     std::array<XrPath, 2> handPaths{XR_NULL_PATH, XR_NULL_PATH};
     std::array<HandActions, 2> handActions{};
     std::array<XrSpace, 2> handSpaces{XR_NULL_HANDLE, XR_NULL_HANDLE};
+    std::array<XrSpace, 2> aimSpaces{XR_NULL_HANDLE, XR_NULL_HANDLE};
     bool hasHandActions = false;
     bool hasHandTracking = false;
     PFN_xrCreateHandTrackerEXT createHandTracker = nullptr;
@@ -152,7 +156,7 @@ std::string trim(std::string s) {
     return s.substr(i);
 }
 
-std::string hostFromIntent(android_app* app) {
+std::string stringExtraFromIntent(android_app* app, const char* name) {
     JNIEnv* env = nullptr;
     if (app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return "";
     jobject activity = app->activity->clazz;
@@ -163,16 +167,31 @@ std::string hostFromIntent(android_app* app) {
     if (intent) {
         jclass intentClass = env->GetObjectClass(intent);
         jmethodID getStringExtra = env->GetMethodID(intentClass, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;");
-        jstring key = env->NewStringUTF("host");
+        jstring key = env->NewStringUTF(name);
         jstring val = getStringExtra ? static_cast<jstring>(env->CallObjectMethod(intent, getStringExtra, key)) : nullptr;
         if (val) {
             const char* c = env->GetStringUTFChars(val, nullptr);
-            if (c) out = c;
-            env->ReleaseStringUTFChars(val, c);
+            if (c) {
+                out = c;
+                env->ReleaseStringUTFChars(val, c);
+            }
+            env->DeleteLocalRef(val);
         }
+        if (key) env->DeleteLocalRef(key);
+        env->DeleteLocalRef(intentClass);
+        env->DeleteLocalRef(intent);
     }
+    if (activityClass) env->DeleteLocalRef(activityClass);
     if (env->ExceptionCheck()) env->ExceptionClear();
     return trim(out);
+}
+
+std::string hostFromIntent(android_app* app) {
+    return stringExtraFromIntent(app, "host");
+}
+
+std::string pairingKeyFromIntent(android_app* app) {
+    return stringExtraFromIntent(app, "pairing_key");
 }
 
 std::string hostFromFile() {
@@ -399,6 +418,17 @@ bool createSession(AppState& S) {
     CHECK(xrCreateReferenceSpace(S.session, &rs, &S.localSpace));
     rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     CHECK(xrCreateReferenceSpace(S.session, &rs, &S.viewSpace));
+    rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+    XrResult stageResult = xrCreateReferenceSpace(S.session, &rs, &S.trackingSpace);
+    if (stageResult == XR_ERROR_REFERENCE_SPACE_UNSUPPORTED) {
+        LOGW("Stage space unavailable; tracking will use the eye-level local space");
+        S.trackingSpace = S.localSpace;
+    } else if (XR_FAILED(stageResult)) {
+        LOGE("Could not create stage tracking space: %d", static_cast<int>(stageResult));
+        return false;
+    } else {
+        LOGI("Tracking uses floor-relative stage space");
+    }
     return true;
 }
 
@@ -420,21 +450,30 @@ bool createBodyTracker(AppState& S) {
         return true;
     }
 
-    XrBodyJointSetFB jointSet = XR_BODY_JOINT_SET_DEFAULT_FB;
-    S.bodyJointCount = XR_BODY_JOINT_COUNT_FB;
-    if (S.hasMetaFullBodyExtension && fullBodyProperties.supportsFullBodyTracking) {
-        jointSet = static_cast<XrBodyJointSetFB>(kMetaFullBodyJointSetValue);
-        S.bodyJointCount = kMetaFullBodyJointCount;
-    }
-
-    XrBodyTrackerCreateInfoFB info{XR_TYPE_BODY_TRACKER_CREATE_INFO_FB};
-    info.bodyJointSet = jointSet;
-    if (XR_FAILED(S.createBodyTracker(S.session, &info, &S.bodyTracker))) {
+    const auto mode = kitvr::createBodyTrackerWithFallback(
+        S.hasMetaFullBodyExtension && fullBodyProperties.supportsFullBodyTracking,
+        [&](bool fullBody) {
+            XrBodyTrackerCreateInfoFB info{XR_TYPE_BODY_TRACKER_CREATE_INFO_FB};
+            info.bodyJointSet = fullBody ? static_cast<XrBodyJointSetFB>(kMetaFullBodyJointSetValue)
+                                         : XR_BODY_JOINT_SET_DEFAULT_FB;
+            XrBodyTrackerFB tracker = XR_NULL_HANDLE;
+            const XrResult result = S.createBodyTracker(S.session, &info, &tracker);
+            if (XR_FAILED(result)) {
+                LOGW("could not create %s body tracker: %d",
+                     fullBody ? "full" : "upper", static_cast<int>(result));
+                return false;
+            }
+            S.bodyTracker = tracker;
+            return true;
+        });
+    if (mode == kitvr::BodyTrackerMode::Unavailable) {
         S.bodyJointCount = 0;
         S.hasBodyTracking = false;
-        LOGW("could not create Meta body tracker; continuing without body tracking");
+        LOGW("continuing without body tracking");
         return true;
     }
+    S.bodyJointCount = mode == kitvr::BodyTrackerMode::FullBody
+                           ? kMetaFullBodyJointCount : XR_BODY_JOINT_COUNT_FB;
     LOGI("body tracking enabled with %u joints", S.bodyJointCount);
     return true;
 }
@@ -500,6 +539,9 @@ bool createActions(AppState& S) {
         std::string actionName = std::string(hand) + "_grip_pose";
         CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Grip pose",
                               XR_ACTION_TYPE_POSE_INPUT, actions.pose));
+        actionName = std::string(hand) + "_aim_pose";
+        CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Aim pose",
+                              XR_ACTION_TYPE_POSE_INPUT, actions.aim));
         actionName = std::string(hand) + "_trigger_value";
         CHECK_BOOL(createHandAction(S, i, actionName.c_str(), "Trigger",
                               XR_ACTION_TYPE_FLOAT_INPUT, actions.trigger));
@@ -523,6 +565,7 @@ bool createActions(AppState& S) {
                               XR_ACTION_TYPE_BOOLEAN_INPUT, actions.menu));
 
         CHECK_BOOL(addBinding(S, actions.pose, (std::string(base) + "/input/grip/pose").c_str(), bindings));
+        CHECK_BOOL(addBinding(S, actions.aim, (std::string(base) + "/input/aim/pose").c_str(), bindings));
         CHECK_BOOL(addBinding(S, actions.trigger, (std::string(base) + "/input/trigger/value").c_str(), bindings));
         CHECK_BOOL(addBinding(S, actions.squeeze, (std::string(base) + "/input/squeeze/value").c_str(), bindings));
         CHECK_BOOL(addBinding(S, actions.thumbstick, (std::string(base) + "/input/thumbstick").c_str(), bindings));
@@ -555,6 +598,8 @@ bool createActions(AppState& S) {
         spaceInfo.subactionPath = S.handPaths[i];
         spaceInfo.poseInActionSpace.orientation.w = 1.0f;
         CHECK(xrCreateActionSpace(S.session, &spaceInfo, &S.handSpaces[i]));
+        spaceInfo.action = S.handActions[i].aim;
+        CHECK(xrCreateActionSpace(S.session, &spaceInfo, &S.aimSpaces[i]));
     }
     S.hasHandActions = true;
     return true;
@@ -582,7 +627,7 @@ kitvr::TrackingHand readControllerHand(AppState& S, size_t index, XrTime display
         XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
         const XrSpaceLocationFlags required = XR_SPACE_LOCATION_POSITION_VALID_BIT |
                                               XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-        if (XR_SUCCEEDED(xrLocateSpace(S.handSpaces[index], S.localSpace, displayTime, &location)) &&
+        if (XR_SUCCEEDED(xrLocateSpace(S.handSpaces[index], S.trackingSpace, displayTime, &location)) &&
             (location.locationFlags & required) == required) {
             hand.active = true;
             hand.pose[0] = location.pose.position.x;
@@ -592,6 +637,25 @@ kitvr::TrackingHand readControllerHand(AppState& S, size_t index, XrTime display
             hand.pose[4] = location.pose.orientation.y;
             hand.pose[5] = location.pose.orientation.z;
             hand.pose[6] = location.pose.orientation.w;
+        }
+    }
+    if (hand.active) {
+        getInfo.action = actions.aim;
+        XrActionStatePose aimState{XR_TYPE_ACTION_STATE_POSE};
+        XrSpaceLocation relativeAim{XR_TYPE_SPACE_LOCATION};
+        const XrSpaceLocationFlags required = XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                                              XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (XR_SUCCEEDED(xrGetActionStatePose(S.session, &getInfo, &aimState)) && aimState.isActive &&
+            XR_SUCCEEDED(xrLocateSpace(S.aimSpaces[index], S.handSpaces[index], displayTime, &relativeAim)) &&
+            (relativeAim.locationFlags & required) == required) {
+            hand.aimActive = true;
+            hand.aimOffset[0] = relativeAim.pose.position.x;
+            hand.aimOffset[1] = relativeAim.pose.position.y;
+            hand.aimOffset[2] = relativeAim.pose.position.z;
+            hand.aimOffset[3] = relativeAim.pose.orientation.x;
+            hand.aimOffset[4] = relativeAim.pose.orientation.y;
+            hand.aimOffset[5] = relativeAim.pose.orientation.z;
+            hand.aimOffset[6] = relativeAim.pose.orientation.w;
         }
     }
 
@@ -628,7 +692,7 @@ kitvr::TrackingHand readTrackedHand(AppState& S, size_t index, XrTime displayTim
         locations.jointCount = static_cast<uint32_t>(joints.size());
         locations.jointLocations = joints.data();
         XrHandJointsLocateInfoEXT locate{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT};
-        locate.baseSpace = S.localSpace;
+        locate.baseSpace = S.trackingSpace;
         locate.time = displayTime;
         if (XR_SUCCEEDED(S.locateHandJoints(S.handTrackers[index], &locate, &locations)) &&
             locations.isActive) {
@@ -659,7 +723,7 @@ bool readBodyTracking(AppState& S, XrTime displayTime, float joints[kitvr::kBody
     if (!S.hasBodyTracking || S.bodyTracker == XR_NULL_HANDLE || S.bodyJointCount == 0) return false;
 
     XrBodyJointsLocateInfoFB locate{XR_TYPE_BODY_JOINTS_LOCATE_INFO_FB};
-    locate.baseSpace = S.localSpace;
+    locate.baseSpace = S.trackingSpace;
     locate.time = displayTime;
     XrBodyJointLocationsFB locations{XR_TYPE_BODY_JOINT_LOCATIONS_FB};
     locations.jointCount = S.bodyJointCount;
@@ -758,14 +822,35 @@ void teardownVideo(AppState& S) {
 
 // ---------------------------------------------------------------- events and frames
 
+const char* sessionStateName(XrSessionState state) {
+    switch (state) {
+        case XR_SESSION_STATE_IDLE: return "IDLE";
+        case XR_SESSION_STATE_READY: return "READY";
+        case XR_SESSION_STATE_SYNCHRONIZED: return "SYNCHRONIZED";
+        case XR_SESSION_STATE_VISIBLE: return "VISIBLE";
+        case XR_SESSION_STATE_FOCUSED: return "FOCUSED";
+        case XR_SESSION_STATE_STOPPING: return "STOPPING";
+        case XR_SESSION_STATE_LOSS_PENDING: return "LOSS_PENDING";
+        case XR_SESSION_STATE_EXITING: return "EXITING";
+        default: return "UNKNOWN";
+    }
+}
+
 void onSessionState(AppState& S, XrSessionState newState) {
     S.state = newState;
-    LOGI("session state %d", static_cast<int>(newState));
+    LOGI("OpenXR session state: %s (%d)", sessionStateName(newState),
+         static_cast<int>(newState));
     switch (newState) {
         case XR_SESSION_STATE_READY: {
             XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO};
             bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-            if (XR_SUCCEEDED(xrBeginSession(S.session, &bi))) S.sessionBegun = true;
+            const XrResult result = xrBeginSession(S.session, &bi);
+            if (XR_SUCCEEDED(result)) {
+                S.sessionBegun = true;
+                LOGI("OpenXR session begun; waiting for visible headset frames");
+            } else {
+                LOGE("xrBeginSession failed: %d", static_cast<int>(result));
+            }
             break;
         }
         case XR_SESSION_STATE_STOPPING:
@@ -870,7 +955,7 @@ void renderFrame(AppState& S) {
         XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
         const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
         const bool headValid =
-            XR_SUCCEEDED(xrLocateSpace(S.viewSpace, S.localSpace, fs.predictedDisplayTime, &loc)) &&
+            XR_SUCCEEDED(xrLocateSpace(S.viewSpace, S.trackingSpace, fs.predictedDisplayTime, &loc)) &&
             (loc.locationFlags & need) == need;
         if (headValid) {
             head[0] = loc.pose.position.x;
@@ -952,12 +1037,10 @@ void renderFrame(AppState& S) {
             S.session, S.viewSpace, fs.predictedDisplayTime, phase, 0.0f);
         if (waiting) layers[layerCount++] = waiting;
     } else if (fs.shouldRender && S.videoSwapchain != XR_NULL_HANDLE && S.cfg.height > 0) {
-        const uint32_t eyeWidth = S.cfg.stereoSbs && S.cfg.width >= 2 && S.cfg.width % 2 == 0
-                                      ? S.cfg.width / 2
-                                      : S.cfg.width;
-        // The frame is a rectilinear render of the eye frustum, so a flat quad that spans the
-        // same frustum reproduces it exactly. Sizing it from the real FOV is what makes it
-        // fill the view instead of hanging in front of you like a monitor.
+        const bool stereoSbs = S.cfg.stereoSbs && S.cfg.width >= 2 && S.cfg.width % 2 == 0;
+        const uint32_t eyeWidth = stereoSbs ? S.cfg.width / 2 : S.cfg.width;
+        // Size the stereo quads from the eye frusta. This is head-locked presentation, not
+        // pose-matched reprojection of the captured SteamVR frame.
         XrViewLocateInfo quadViewInfo{XR_TYPE_VIEW_LOCATE_INFO};
         quadViewInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         quadViewInfo.displayTime = fs.predictedDisplayTime;
@@ -965,9 +1048,12 @@ void renderFrame(AppState& S) {
         XrViewState quadViewState{XR_TYPE_VIEW_STATE};
         XrView eyeViews[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
         uint32_t eyeCount = 0;
+        const auto quadViewFlags =
+            XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
         const bool haveEyes =
             XR_SUCCEEDED(xrLocateViews(S.session, &quadViewInfo, &quadViewState, 2, &eyeCount,
-                                       eyeViews)) && eyeCount == 2;
+                                       eyeViews)) && eyeCount == 2 &&
+            (quadViewState.viewStateFlags & quadViewFlags) == quadViewFlags;
         if (!haveEyes) {
             for (auto& view : eyeViews) {
                 view.fov = {-0.85f, 0.85f, 0.85f, -0.85f};
@@ -986,7 +1072,7 @@ void renderFrame(AppState& S) {
                 {kQuadDistanceM * 0.5f * (tanRight + tanLeft),
                  kQuadDistanceM * 0.5f * (tanUp + tanDown), -kQuadDistanceM});
             quad.layerFlags = 0;
-            quad.space = S.localSpace;
+            quad.space = stereoSbs ? S.viewSpace : S.localSpace;
             quad.eyeVisibility = eye;
             quad.subImage.swapchain = S.videoSwapchain;
             quad.subImage.imageRect.offset = {static_cast<int32_t>(imageX), 0};
@@ -1000,7 +1086,6 @@ void renderFrame(AppState& S) {
             quad.size = {kQuadDistanceM * (tanRight - tanLeft),
                          kQuadDistanceM * (tanUp - tanDown)};
         };
-        const bool stereoSbs = S.cfg.stereoSbs && S.cfg.width >= 2 && S.cfg.width % 2 == 0;
         if (stereoSbs) {
             configureQuad(leftQuad, XR_EYE_VISIBILITY_LEFT, 0, eyeViews[0]);
             configureQuad(rightQuad, XR_EYE_VISIBILITY_RIGHT, eyeWidth, eyeViews[1]);
@@ -1036,7 +1121,13 @@ void cleanup(AppState& S) {
         if (space != XR_NULL_HANDLE) xrDestroySpace(space);
         space = XR_NULL_HANDLE;
     }
+    for (XrSpace& space : S.aimSpaces) {
+        if (space != XR_NULL_HANDLE) xrDestroySpace(space);
+        space = XR_NULL_HANDLE;
+    }
     if (S.viewSpace != XR_NULL_HANDLE) xrDestroySpace(S.viewSpace);
+    if (S.trackingSpace != XR_NULL_HANDLE && S.trackingSpace != S.localSpace)
+        xrDestroySpace(S.trackingSpace);
     if (S.localSpace != XR_NULL_HANDLE) xrDestroySpace(S.localSpace);
     if (S.session != XR_NULL_HANDLE) xrDestroySession(S.session);
     if (S.actionSet != XR_NULL_HANDLE) xrDestroyActionSet(S.actionSet);
@@ -1076,7 +1167,12 @@ void android_main(android_app* app) {
         LOGW("body tracking setup failed; continuing without it");
     }
     if (!createActions(S)) LOGW("controller actions unavailable; continuing with head tracking");
-    S.net.startControl(host);
+    const std::string pairingKey = pairingKeyFromIntent(app);
+    if (pairingKey.size() != 64) {
+        LOGE("a 64-character pairing key is required; enter the key shown by KitVR Desktop");
+    } else {
+        S.net.startControl(host, pairingKey, app->activity->vm, app->activity->clazz);
+    }
 
     while (!app->destroyRequested && !S.exitRequested) {
         int events = 0;

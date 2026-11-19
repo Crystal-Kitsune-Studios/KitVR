@@ -3,6 +3,18 @@
 #include <limits>
 
 int main() {
+    kitvr::TrackingHand leftAim;
+    leftAim.active = true;
+    leftAim.aimActive = true;
+    leftAim.aimOffset[1] = 0.125f;
+    const float head[7] = {0, 0, 0, 0, 0, 0, 1};
+    const auto packet = kitvr::encodeTracking(7, 42, head, leftAim, kitvr::TrackingHand{});
+    uint32_t expectedAimY;
+    std::memcpy(&expectedAimY, &leftAim.aimOffset[1], sizeof(expectedAimY));
+    if (packet.size() != 192 || packet[1] != 1 || kitvr::get16(packet.data() + 42) != 3 ||
+        kitvr::get16(packet.data() + 90) != 0 ||
+        kitvr::get32(packet.data() + 140) != expectedAimY) return 12;
+
     int controllerReads = 0;
     int trackedReads = 0;
     kitvr::TrackingHand controller;

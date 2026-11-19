@@ -21,6 +21,7 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -255,7 +256,29 @@ int main() {
     constexpr uint32_t kFrames = 90;
     const auto start = std::chrono::steady_clock::now();
     float lastColor[4]{};
+    const char* name = std::getenv("KITVR_STEAMVR_SHM");
+    const std::string path = std::string("/dev/shm/") + (name ? name : "kitvr-steamvr");
+    int heldFd = -1;
+    std::vector<uint8_t> lockedFrame(48 + static_cast<size_t>(width) * height * 4);
     for (uint32_t frame = 0; frame < kFrames; ++frame) {
+        if (frame == 20) {
+            heldFd = open(path.c_str(), O_RDONLY);
+            check(heldFd >= 0, "frame ring available during presents");
+            if (heldFd >= 0) {
+                check(flock(heldFd, LOCK_SH) == 0, "acquire reader lock");
+                check(pread(heldFd, lockedFrame.data(), lockedFrame.size(), 0) ==
+                          static_cast<ssize_t>(lockedFrame.size()), "read locked frame");
+            }
+        }
+        if (frame == 30 && heldFd >= 0) {
+            std::vector<uint8_t> after(lockedFrame.size());
+            check(pread(heldFd, after.data(), after.size(), 0) ==
+                      static_cast<ssize_t>(after.size()) && after == lockedFrame,
+                  "publisher does not overwrite a locked frame");
+            check(flock(heldFd, LOCK_UN) == 0, "release reader lock");
+            close(heldFd);
+            heldFd = -1;
+        }
         const uint32_t slot = frame % kInFlight;
         vkWaitForFences(device, 1, &done[slot], VK_TRUE, UINT64_MAX);
         vkResetFences(device, 1, &done[slot]);
@@ -307,6 +330,10 @@ int main() {
         present.pImageIndices = &index;
         if (!require(vkQueuePresentKHR(queue, &present), "present")) break;
     }
+    if (heldFd >= 0) {
+        flock(heldFd, LOCK_UN);
+        close(heldFd);
+    }
     vkDeviceWaitIdle(device);
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -321,8 +348,6 @@ int main() {
 
     // Give the ring worker a moment to publish the last copy.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    const char* name = std::getenv("KITVR_STEAMVR_SHM");
-    const std::string path = std::string("/dev/shm/") + (name ? name : "kitvr-steamvr");
     const int fd = open(path.c_str(), O_RDONLY);
     check(fd >= 0, "frame ring exists");
     if (fd >= 0) {
@@ -334,9 +359,10 @@ int main() {
         uint64_t frameId = 0;
         std::memcpy(header, ring, sizeof(header));
         std::memcpy(&frameId, ring + 32, sizeof(frameId));
-        check(header[2] == width && header[3] == height && header[4] == 0, "ring holds 640x360 BGRA8");
+        check(header[1] == 2 && header[2] == width && header[3] == height && header[4] == 0,
+              "ring holds version 2 640x360 BGRA8");
         std::printf("     %llu frames published\n", static_cast<unsigned long long>(frameId));
-        check(frameId >= kFrames - 5, "nearly every presented frame reached the ring");
+        check(frameId >= kFrames - 16, "unlocked frames reached the ring");
         // Centre pixel of the last frame, BGRA.
         const uint8_t* pixel = ring + 48 + (static_cast<size_t>(height / 2) * width + width / 2) * 4;
         const auto near = [](uint8_t value, float expected) {

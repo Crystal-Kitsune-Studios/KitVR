@@ -13,6 +13,29 @@
 
 namespace {
 std::atomic<int> sendFailurePhase{1};
+std::atomic<bool> stallConnect{false};
+std::atomic<int> stalledFd{-1};
+std::atomic<int> stalledAttempts{0};
+}
+
+extern "C" int __real_connect(int, const sockaddr*, socklen_t);
+extern "C" int __wrap_connect(int fd, const sockaddr* address, socklen_t length) {
+    if (stallConnect) {
+        stalledFd = fd;
+        ++stalledAttempts;
+        errno = EINPROGRESS;
+        return -1;
+    }
+    return __real_connect(fd, address, length);
+}
+
+extern "C" int __real_poll(pollfd*, nfds_t, int);
+extern "C" int __wrap_poll(pollfd* fds, nfds_t count, int timeout) {
+    if (count == 1 && fds[0].fd == stalledFd && stallConnect) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
+        return 0;
+    }
+    return __real_poll(fds, count, timeout);
 }
 
 extern "C" ssize_t __real_send(int, const void*, size_t, int);
@@ -46,6 +69,13 @@ namespace {
 int makeSocket(int type, uint16_t port) {
     int fd = socket(AF_INET, type, 0);
     if (fd < 0) return -1;
+    const int reuse = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        const int error = errno;
+        close(fd);
+        errno = error;
+        return -1;
+    }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -223,5 +253,17 @@ int main() {
     close(third);
     close(listener);
     close(udp);
+
+    stallConnect = true;
+    kitvr::Session stalledSession;
+    stalledSession.startControl("127.0.0.1");
+    const auto connectDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(7);
+    while (stalledAttempts < 2 && std::chrono::steady_clock::now() < connectDeadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (stalledAttempts < 2 || stalledSession.controlReady()) return 37;
+    const auto stopStart = std::chrono::steady_clock::now();
+    stalledSession.shutdown();
+    if (std::chrono::steady_clock::now() - stopStart > std::chrono::seconds(1)) return 38;
+    stallConnect = false;
     return 0;
 }

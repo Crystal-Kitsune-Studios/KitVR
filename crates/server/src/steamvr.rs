@@ -14,7 +14,9 @@ use std::sync::Arc;
 pub const DEFAULT_NAME: &str = "kitvr-steamvr";
 
 const MAGIC: u32 = 0x4B56_5246; // "KVRF"
-const VERSION: u32 = 1;
+const LEGACY_VERSION: u32 = 1;
+#[cfg(unix)]
+const LOCKED_VERSION: u32 = 2;
 const HEADER_BYTES: usize = 48;
 const FRAME_ID_OFFSET: usize = 32;
 
@@ -23,8 +25,7 @@ pub const FORMAT_RGBA8: u32 = 1;
 pub const FORMAT_X2RGB10: u32 = 2;
 pub const FORMAT_X2BGR10: u32 = 3;
 
-/// A mapped view of the shared memory ring. Frames are published with a release store on the
-/// frame id, so a reader never observes a half written frame under a new id.
+/// A mapped view of the shared memory ring.
 #[derive(Debug)]
 pub struct SteamVrRing {
     mapping: Mapping,
@@ -44,6 +45,10 @@ unsafe impl Sync for SteamVrRing {}
 struct Mapping {
     base: *mut u8,
     len: usize,
+    #[cfg(unix)]
+    file: std::fs::File,
+    #[cfg(unix)]
+    lock: std::sync::Mutex<()>,
     #[cfg(windows)]
     handle: windows_sys::Win32::Foundation::HANDLE,
 }
@@ -52,6 +57,7 @@ struct Mapping {
 impl Mapping {
     fn open(name: &str) -> io::Result<Self> {
         use std::ffi::CString;
+        use std::os::fd::FromRawFd;
         // Overridable so a sandboxed server (for example a Flatpak) can be pointed at a directory
         // both sandboxes can see.
         let directory = std::env::var("KITVR_STEAMVR_SHM_DIR")
@@ -61,7 +67,7 @@ impl Mapping {
         let full_path = format!("{directory}/{name}");
         let path = CString::new(full_path.clone())
             .map_err(|_| io::Error::other("invalid SteamVR shared memory name"))?;
-        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if fd < 0 {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -71,15 +77,13 @@ impl Mapping {
                 ),
             ));
         }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-            let error = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(error);
+            return Err(io::Error::last_os_error());
         }
         let len = stat.st_size.max(0) as usize;
         if len < HEADER_BYTES {
-            unsafe { libc::close(fd) };
             return Err(io::Error::other(
                 "SteamVR frame ring is smaller than its header; the layer may not have started",
             ));
@@ -87,11 +91,40 @@ impl Mapping {
         let mapped = unsafe {
             libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0)
         };
-        unsafe { libc::close(fd) };
         if mapped == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { base: mapped as *mut u8, len })
+        Ok(Self { base: mapped as *mut u8, len, file, lock: std::sync::Mutex::new(()) })
+    }
+
+    fn lock_shared(&self) -> io::Result<MappingLock<'_>> {
+        use std::os::fd::AsRawFd;
+        let guard = self.lock.lock().map_err(|_| io::Error::other("SteamVR ring lock poisoned"))?;
+        let fd = self.file.as_raw_fd();
+        loop {
+            if unsafe { libc::flock(fd, libc::LOCK_SH) } == 0 {
+                return Ok(MappingLock { fd, _guard: guard });
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+struct MappingLock<'a> {
+    fd: std::os::fd::RawFd,
+    _guard: std::sync::MutexGuard<'a, ()>,
+}
+
+#[cfg(unix)]
+impl Drop for MappingLock<'_> {
+    fn drop(&mut self) {
+        if unsafe { libc::flock(self.fd, libc::LOCK_UN) } != 0 {
+            eprintln!("could not unlock SteamVR frame ring: {}", io::Error::last_os_error());
+        }
     }
 }
 
@@ -173,6 +206,8 @@ impl SteamVrRing {
         let mapping = Mapping::open(name)?;
         let base = mapping.base;
         let len = mapping.len;
+        #[cfg(unix)]
+        let lock = mapping.lock_shared()?;
         if len < HEADER_BYTES {
             return Err(io::Error::other(
                 "SteamVR frame ring is smaller than its header; the producer may not have started",
@@ -185,10 +220,18 @@ impl SteamVrRing {
             return Err(fail("SteamVR frame ring has the wrong magic number".to_string()));
         }
         let version = read_u32(base, 4);
-        if version != VERSION {
+        #[cfg(unix)]
+        let supported = version == LEGACY_VERSION || version == LOCKED_VERSION;
+        #[cfg(windows)]
+        let supported = version == LEGACY_VERSION;
+        if !supported {
             return Err(fail(format!(
-                "SteamVR frame ring version {version} is not supported (expected {VERSION})"
+                "SteamVR frame ring version {version} is not supported"
             )));
+        }
+        #[cfg(unix)]
+        if version == LEGACY_VERSION {
+            eprintln!("SteamVR capture uses the legacy unsynchronized frame ring; update the Vulkan layer to avoid torn frames");
         }
         let width = read_u32(base, 8);
         let height = read_u32(base, 12);
@@ -210,6 +253,8 @@ impl SteamVrRing {
             return Err(fail("SteamVR frame ring is smaller than its payload".to_string()));
         }
 
+        #[cfg(unix)]
+        drop(lock);
         Ok(Arc::new(Self {
             mapping,
             width,
@@ -239,14 +284,15 @@ impl SteamVrRing {
     }
 
     /// Copies the newest frame into `out` when it is newer than the previous call.
-    pub fn read_frame(&self, out: &mut Vec<u8>) -> bool {
+    pub fn read_frame(&self, out: &mut Vec<u8>) -> io::Result<bool> {
+        #[cfg(unix)]
+        let _lock = self.mapping.lock_shared()?;
         let id = unsafe {
             (*(self.mapping.base.add(FRAME_ID_OFFSET) as *const AtomicU64)).load(Ordering::Acquire)
         };
         if id == 0 || id == self.last_frame.load(Ordering::Relaxed) {
-            return false;
+            return Ok(false);
         }
-        self.last_frame.store(id, Ordering::Relaxed);
         // ffmpeg was started for the geometry seen at open, and the mapping has the size seen at
         // open, so frames published after the compositor resized its window are skipped.
         let payload = read_u32(self.mapping.base, 24) as usize;
@@ -261,12 +307,59 @@ impl SteamVrRing {
                     self.width, self.height
                 );
             }
-            return false;
+            return Ok(false);
         }
         let pixels = unsafe { std::slice::from_raw_parts(self.mapping.base.add(HEADER_BYTES), payload) };
         out.clear();
         out.extend_from_slice(pixels);
-        true
+        self.last_frame.store(id, Ordering::Relaxed);
+        Ok(true)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn waits_for_writer_before_copying_frame() {
+        let name = format!("kitvr-ring-lock-test-{}", std::process::id());
+        let path = std::path::Path::new("/dev/shm").join(&name);
+        let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        let len = HEADER_BYTES + 16;
+        file.set_len(len as u64).unwrap();
+        let mapped = unsafe {
+            libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE,
+                       libc::MAP_SHARED, file.as_raw_fd(), 0)
+        };
+        assert_ne!(mapped, libc::MAP_FAILED);
+        let base = mapped as *mut u8;
+        for (i, value) in [MAGIC, LOCKED_VERSION, 2, 2, FORMAT_BGRA8, 8, 16, 0].iter().enumerate() {
+            unsafe { std::ptr::write_unaligned(base.add(i * 4) as *mut u32, *value) };
+        }
+        let ring = SteamVrRing::open(&name).unwrap();
+        assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0);
+        unsafe {
+            std::ptr::write_bytes(base.add(HEADER_BYTES), 0x11, 8);
+            (*(base.add(FRAME_ID_OFFSET) as *const AtomicU64)).store(1, Ordering::Release);
+        }
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut frame = Vec::new();
+            let read = ring.read_frame(&mut frame).unwrap();
+            tx.send((read, frame)).unwrap();
+        });
+        let early = rx.recv_timeout(Duration::from_millis(100));
+        unsafe { std::ptr::write_bytes(base.add(HEADER_BYTES + 8), 0x11, 8) };
+        assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) }, 0);
+        let result = if early.is_ok() { early.unwrap() } else { rx.recv_timeout(Duration::from_secs(2)).unwrap() };
+        reader.join().unwrap();
+        unsafe { libc::munmap(mapped, len) };
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(result, (true, vec![0x11; 16]));
     }
 }
 
@@ -296,7 +389,7 @@ mod tests {
         let payload = width * height * 4;
         let used = HEADER_BYTES + payload as usize;
         assert!(!unsafe { VirtualAlloc(view.Value, used, MEM_COMMIT, PAGE_READWRITE) }.is_null());
-        let header = [MAGIC, VERSION, width, height, FORMAT_RGBA8, width * 4, payload, 0];
+        let header = [MAGIC, LEGACY_VERSION, width, height, FORMAT_RGBA8, width * 4, payload, 0];
         for (i, value) in header.iter().enumerate() {
             unsafe { std::ptr::write_unaligned(base.add(i * 4) as *mut u32, *value) };
         }
@@ -307,11 +400,11 @@ mod tests {
         let ring = SteamVrRing::open(name).expect("open ring");
         assert_eq!((ring.width(), ring.height(), ring.pixel_format()), (4, 2, "rgba"));
         let mut frame = Vec::new();
-        assert!(!ring.read_frame(&mut frame), "frame id 0 means nothing published yet");
+        assert!(!ring.read_frame(&mut frame).unwrap(), "frame id 0 means nothing published yet");
         unsafe { (*(base.add(FRAME_ID_OFFSET) as *const AtomicU64)).store(1, Ordering::Release) };
-        assert!(ring.read_frame(&mut frame));
+        assert!(ring.read_frame(&mut frame).unwrap());
         assert_eq!(frame, (0..payload as u8).collect::<Vec<_>>());
-        assert!(!ring.read_frame(&mut frame), "the same frame is not returned twice");
+        assert!(!ring.read_frame(&mut frame).unwrap(), "the same frame is not returned twice");
 
         drop(ring);
         unsafe {

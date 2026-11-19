@@ -1608,6 +1608,7 @@ dependencies = [
  "glam",
  "gltf",
  "image",
+ "kitvr-proto",
  "mdns-sd",
  "serde",
  "serde_json",
@@ -1621,6 +1622,9 @@ dependencies = [
 [[package]]
 name = "kitvr-proto"
 version = "0.1.0"
+dependencies = [
+ "ring",
+]
 
 [[package]]
 name = "kitvr-server"

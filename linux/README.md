@@ -39,6 +39,7 @@ kitvr-server --source steamvr --stereo-sbs
 
 `--stereo-sbs` treats the captured image as one eye per half. Drop it for a mono stream.
 `--width` and `--height` scale the captured image, so you can stream below the capture resolution.
+In KitVR Desktop, select **SteamVR** as the video source to enable side-by-side mode.
 
 Both sides read `KITVR_STEAMVR_SHM` for the ring name, which defaults to `kitvr-steamvr`, and
 `KITVR_STEAMVR_SHM_DIR` for the directory, which defaults to `/dev/shm`. Set both to the same values
@@ -46,13 +47,16 @@ when the layer and the server are in different sandboxes, such as when the serve
 
 ## Shared memory ring
 
-The ring is a single frame slot. The producer writes the pixels, then bumps the frame id with a
-release store, so a reader never sees a partially written frame under a fresh id.
+The ring is a single frame slot. On Linux, version 2 uses an advisory `flock`: the reader holds a
+shared lock while copying, and the producer takes an exclusive lock when publishing. If a reader
+is copying, the producer drops that frame rather than blocking the compositor. Update the server
+and layer together; older servers reject version 2. The server still accepts legacy version 1 but
+warns that its frames may tear because that producer does not participate in locking.
 
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 4 | magic `KVRF` (`0x4B565246`) |
-| 4 | 4 | version, currently `1` |
+| 4 | 4 | version, `2` on Linux; `1` for the legacy and Windows layouts |
 | 8 | 4 | width in pixels |
 | 12 | 4 | height in pixels |
 | 16 | 4 | format, `0` = BGRA8, `1` = RGBA8, `2` = X2RGB10 (A2R10G10B10), `3` = X2BGR10 (A2B10G10R10) |
@@ -134,7 +138,8 @@ Start `kitvr-server` and the Quest client so poses reach the driver.
 - The captured image is whatever vrcompositor presents, including the mirror layout. Choose the
   eye layout in SteamVR's display mirror settings before streaming.
 - At the default 3664x1920 the server's CPU path (copy, pipe, colour conversion in ffmpeg) does not
-  sustain 90 fps; the layer itself publishes at the display rate.
+  sustain 90 fps; the layer itself publishes at the display rate. The server samples at no more
+  than the configured stream FPS, dropping intermediate frames when the display runs faster.
 - SteamVR updates replace `vrcompositor`; run `install.sh` again after an update.
 - The image is not reprojected. SteamVR renders at its own resolution and the headset displays it
   as a flat stereo pair, so head motion is tracked but not compensated.

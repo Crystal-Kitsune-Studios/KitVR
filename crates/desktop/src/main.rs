@@ -9,20 +9,11 @@ use std::time::Duration;
 
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke};
 
+mod theme;
+use theme::{Palette, ThemeChoice, ThemeSettings};
+
 const LOG_LIMIT: usize = 800;
 
-const INK: Color32 = Color32::from_rgb(14, 20, 22);
-const HEADER_FILL: Color32 = Color32::from_rgb(24, 33, 36);
-const SURFACE: Color32 = Color32::from_rgb(22, 30, 33);
-const RAISED: Color32 = Color32::from_rgb(28, 38, 41);
-const SUNKEN: Color32 = Color32::from_rgb(11, 17, 19);
-const LINE: Color32 = Color32::from_rgb(42, 54, 58);
-const TEXT: Color32 = Color32::from_rgb(232, 237, 236);
-const MUTED: Color32 = Color32::from_rgb(147, 162, 163);
-const DIM: Color32 = Color32::from_rgb(130, 145, 143);
-const AMBER: Color32 = Color32::from_rgb(242, 166, 90);
-const AMBER_INK: Color32 = Color32::from_rgb(26, 18, 6);
-const AMBER_TEXT: Color32 = Color32::from_rgb(245, 192, 138);
 const GREEN: Color32 = Color32::from_rgb(98, 201, 142);
 const GREEN_TEXT: Color32 = Color32::from_rgb(168, 232, 195);
 const RED_TEXT: Color32 = Color32::from_rgb(243, 176, 169);
@@ -64,6 +55,7 @@ struct KitVrApp {
     audio_device: String,
     microphone_device: String,
     mouse_enabled: bool,
+    avatar_tracking: bool,
     audio_devices: Vec<String>,
     child: Option<Child>,
     log_tx: Sender<String>,
@@ -82,6 +74,8 @@ struct KitVrApp {
     update_in_progress: bool,
     console_open: bool,
     autoscroll: bool,
+    theme: ThemeSettings,
+    theme_open: bool,
 }
 
 struct UpdateOffer {
@@ -113,6 +107,7 @@ struct SavedSettings {
     audio_enabled: bool,
     audio_device: String,
     microphone_device: String,
+    theme: ThemeSettings,
 }
 
 impl Default for SavedSettings {
@@ -123,38 +118,17 @@ impl Default for SavedSettings {
             encoder: "libx265".to_string(),
             resolution: RESOLUTIONS[0].to_string(),
             fps: 60,
-            bitrate_kbps: 40_000,
+            bitrate_kbps: 20_000,
             audio_enabled: true,
             audio_device: "default".to_string(),
             microphone_device: String::new(),
+            theme: ThemeSettings::default(),
         }
     }
 }
 
 impl KitVrApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = INK;
-        visuals.window_fill = SURFACE;
-        visuals.extreme_bg_color = SUNKEN;
-        visuals.faint_bg_color = Color32::from_rgb(18, 25, 27);
-        visuals.window_stroke = Stroke::new(1.0_f32, LINE);
-        visuals.widgets.noninteractive.bg_fill = SURFACE;
-        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
-        visuals.widgets.inactive.bg_fill = RAISED;
-        visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
-        visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(38, 50, 53);
-        visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT);
-        visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
-        visuals.widgets.active.bg_fill = AMBER;
-        visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, AMBER_INK);
-        visuals.widgets.active.rounding = egui::Rounding::same(8.0);
-        visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(242, 166, 90, 60);
-        visuals.selection.stroke = Stroke::new(1.0_f32, AMBER_TEXT);
-        visuals.window_rounding = egui::Rounding::same(12.0);
-        visuals.menu_rounding = egui::Rounding::same(8.0);
-        cc.egui_ctx.set_visuals(visuals);
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(10.0, 8.0);
         style.spacing.button_padding = egui::vec2(12.0, 7.0);
@@ -185,6 +159,7 @@ impl KitVrApp {
             audio_device: settings.audio_device,
             microphone_device: settings.microphone_device,
             mouse_enabled: false,
+            avatar_tracking: false,
             audio_devices: Vec::new(),
             child: None,
             log_tx,
@@ -203,6 +178,8 @@ impl KitVrApp {
             update_in_progress: false,
             console_open: true,
             autoscroll: true,
+            theme: settings.theme,
+            theme_open: false,
         };
         thread::spawn(move || {
             let _ = update_tx.send(check_latest_release());
@@ -214,6 +191,27 @@ impl KitVrApp {
         self.logs.push_back(line.into());
         while self.logs.len() > LOG_LIMIT {
             self.logs.pop_front();
+        }
+    }
+
+    fn open_mascot(&mut self) {
+        let Some(executable) = find_executable("kitvr-mascot") else {
+            self.status = "kitvr-mascot was not found beside KitVR Desktop or on PATH.".to_string();
+            self.push_log(self.status.clone());
+            return;
+        };
+        match Command::new(executable).spawn() {
+            Ok(mut child) => {
+                thread::spawn(move || {
+                    if let Err(error) = child.wait() {
+                        eprintln!("desktop avatar process failed: {error}");
+                    }
+                });
+            }
+            Err(error) => {
+                self.status = format!("Could not open desktop avatar: {error}");
+                self.push_log(self.status.clone());
+            }
         }
     }
 
@@ -233,14 +231,8 @@ impl KitVrApp {
         };
 
         let (width, height) = parse_resolution(&self.resolution);
-        let source = match self.source.as_str() {
-            "Desktop" => "desktop".to_string(),
-            "File" => format!("file:{}", self.file_path.trim()),
-            _ => "testpattern".to_string(),
-        };
-        let mut args = vec![
-            "--source".to_string(),
-            source,
+        let mut args = source_args(&self.source, &self.file_path);
+        args.extend([
             "--encoder".to_string(),
             self.encoder.clone(),
             "--width".to_string(),
@@ -251,7 +243,7 @@ impl KitVrApp {
             self.fps.to_string(),
             "--bitrate-kbps".to_string(),
             self.bitrate_kbps.to_string(),
-        ];
+        ]);
         if !self.audio_enabled {
             args.push("--no-audio".to_string());
         } else if self.audio_device != "default" {
@@ -265,6 +257,9 @@ impl KitVrApp {
         }
         if self.mouse_enabled {
             args.push("--enable-mouse".to_string());
+        }
+        if self.avatar_tracking {
+            args.push("--avatar-tracking".to_string());
         }
 
         match Command::new(&executable)
@@ -479,6 +474,7 @@ impl eframe::App for KitVrApp {
             audio_enabled: self.audio_enabled,
             audio_device: self.audio_device.clone(),
             microphone_device: self.microphone_device.clone(),
+            theme: self.theme.clone(),
         };
         if let Ok(value) = serde_json::to_string(&settings) {
             storage.set_string(SETTINGS_STORAGE_KEY, value);
@@ -486,6 +482,9 @@ impl eframe::App for KitVrApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let p = self.theme.palette();
+        ctx.set_visuals(p.visuals());
+        ctx.data_mut(|data| data.insert_temp(egui::Id::new("kitvr_palette"), p));
         self.update_server();
         if self.restart_for_update {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -496,8 +495,8 @@ impl eframe::App for KitVrApp {
         egui::TopBottomPanel::top("header")
             .frame(
                 egui::Frame::default()
-                    .fill(HEADER_FILL)
-                    .stroke(Stroke::new(1.0_f32, LINE))
+                    .fill(p.header)
+                    .stroke(Stroke::new(1.0_f32, p.line))
                     .inner_margin(egui::Margin::symmetric(20.0, 14.0)),
             )
             .show(ctx, |ui| self.header(ui));
@@ -509,7 +508,7 @@ impl eframe::App for KitVrApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::default()
-                    .fill(INK)
+                    .fill(p.ink)
                     .inner_margin(egui::Margin::symmetric(20.0, 18.0)),
             )
             .show(ctx, |ui| self.body(ui));
@@ -517,11 +516,62 @@ impl eframe::App for KitVrApp {
         if self.tutorial_open {
             self.tutorial_window(ctx);
         }
+        if self.theme_open {
+            self.theme_window(ctx);
+        }
     }
 }
 
 impl KitVrApp {
+    fn theme_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.theme_open;
+        egui::Window::new("Themes")
+            .id(egui::Id::new("kitvr_themes"))
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_min_width(300.0);
+                egui::ComboBox::from_id_salt("theme_choice")
+                    .selected_text(match self.theme.choice {
+                        ThemeChoice::Classic => "Classic",
+                        ThemeChoice::Midnight => "Midnight",
+                        ThemeChoice::Blossom => "Blossom",
+                        ThemeChoice::Custom => "Custom",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.theme.choice, ThemeChoice::Classic, "Classic");
+                        ui.selectable_value(&mut self.theme.choice, ThemeChoice::Midnight, "Midnight");
+                        ui.selectable_value(&mut self.theme.choice, ThemeChoice::Blossom, "Blossom");
+                        ui.selectable_value(&mut self.theme.choice, ThemeChoice::Custom, "Custom");
+                    });
+                if self.theme.choice == ThemeChoice::Custom {
+                    ui.add_space(8.0);
+                    for (label, color) in [
+                        ("Background", &mut self.theme.background),
+                        ("Panels", &mut self.theme.surface),
+                        ("Text", &mut self.theme.text),
+                        ("Accent", &mut self.theme.accent),
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.color_edit_button_srgb(color);
+                            ui.label(label);
+                        });
+                    }
+                    ui.label("Choose contrasting text and panel colors for readability.");
+                    if ui.button("Reset custom colors").clicked() {
+                        self.theme = ThemeSettings {
+                            choice: ThemeChoice::Custom,
+                            ..ThemeSettings::default()
+                        };
+                    }
+                }
+            });
+        self.theme_open = open;
+    }
+
     fn show_console(&mut self, ctx: &egui::Context) {
+        let p = self.theme.palette();
         egui::TopBottomPanel::bottom("console")
             .resizable(true)
             .default_height(206.0)
@@ -529,18 +579,19 @@ impl KitVrApp {
             .max_height(420.0)
             .frame(
                 egui::Frame::default()
-                    .fill(INK)
+                    .fill(p.ink)
                     .inner_margin(egui::Margin::symmetric(20.0, 14.0)),
             )
             .show(ctx, |ui| self.console_panel(ui));
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
+        let p = self.theme.palette();
         ui.horizontal(|ui| {
             let (mark_rect, _) =
                 ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
             ui.painter()
-                .rect_filled(mark_rect, egui::Rounding::same(8.0), AMBER);
+                .rect_filled(mark_rect, egui::Rounding::same(8.0), p.accent);
             let center = mark_rect.center();
             ui.painter().add(egui::Shape::convex_polygon(
                 vec![
@@ -548,18 +599,18 @@ impl KitVrApp {
                     egui::pos2(center.x + 7.5, center.y + 6.0),
                     egui::pos2(center.x - 7.5, center.y + 6.0),
                 ],
-                AMBER_INK,
+                p.accent_ink,
                 Stroke::NONE,
             ));
 
             ui.add_space(2.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
-                ui.label(RichText::new("KitVR").size(17.0).strong().color(TEXT));
+                ui.label(RichText::new("KitVR").size(17.0).strong().color(p.text));
                 ui.label(
                     RichText::new("PC to Quest streaming")
                         .size(11.5)
-                        .color(MUTED),
+                        .color(p.muted),
                 );
             });
 
@@ -570,7 +621,7 @@ impl KitVrApp {
                 ui.label(
                     RichText::new(format!("v{}", app_version()))
                         .size(11.0)
-                        .color(DIM),
+                        .color(p.dim),
                 );
                 let log_label = if self.console_open { "Hide log" } else { "Log" };
                 if ui.button(log_label).clicked() {
@@ -579,6 +630,9 @@ impl KitVrApp {
                 if ui.button("Tutorial").clicked() {
                     self.tutorial_open = true;
                     self.tutorial_step = 0;
+                }
+                if ui.button("Themes").clicked() {
+                    self.theme_open = true;
                 }
                 if let Some(version) = self.update_offer.as_ref().map(|offer| offer.version.clone())
                 {
@@ -596,17 +650,18 @@ impl KitVrApp {
                     ui.label(
                         RichText::new(format!("Update · v{version}"))
                             .size(11.5)
-                            .color(GREEN_TEXT),
+                            .color(if p.light_surface { Color32::from_rgb(25, 100, 58) } else { GREEN_TEXT }),
                     );
                 } else {
                     let message = self.update_message.clone();
-                    ui.label(RichText::new(message).size(11.0).color(DIM));
+                    ui.label(RichText::new(message).size(11.0).color(p.dim));
                 }
             });
         });
     }
 
     fn status_pill(&self, ui: &mut egui::Ui) {
+        let p = self.theme.palette();
         let running = self.child.is_some();
         let (fill, border, dot, text, text_color) = if running {
             (
@@ -614,15 +669,15 @@ impl KitVrApp {
                 Color32::from_rgba_unmultiplied(98, 201, 142, 95),
                 GREEN,
                 "Streaming",
-                GREEN_TEXT,
+                if p.light_surface { Color32::from_rgb(25, 100, 58) } else { GREEN_TEXT },
             )
         } else {
             (
                 Color32::from_rgba_unmultiplied(147, 162, 163, 16),
                 Color32::from_rgba_unmultiplied(147, 162, 163, 60),
-                MUTED,
+                p.muted,
                 "Idle",
-                MUTED,
+                p.muted,
             )
         };
         egui::Frame::default()
@@ -667,10 +722,11 @@ impl KitVrApp {
     }
 
     fn stream_card(&mut self, ui: &mut egui::Ui, height: f32) {
+        let p = self.theme.palette();
         let running = self.child.is_some();
         egui::Frame::default()
-            .fill(SURFACE)
-            .stroke(Stroke::new(1.0_f32, LINE))
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0_f32, p.line))
             .rounding(egui::Rounding::same(12.0))
             .inner_margin(egui::Margin::same(16.0))
             .show(ui, |ui| {
@@ -690,10 +746,10 @@ impl KitVrApp {
                     ui.columns(2, |columns| {
                         field(&mut columns[0], "VIDEO SOURCE", |ui| {
                             egui::ComboBox::from_id_salt("source")
-                                .selected_text(RichText::new(source).size(13.5).color(TEXT))
+                                .selected_text(RichText::new(source).size(13.5).color(p.text))
                                 .width(ui.available_width())
                                 .show_ui(ui, |ui| {
-                                    for option in ["Test pattern", "Desktop", "File"] {
+                                    for option in ["Test pattern", "Desktop", "File", "SteamVR"] {
                                         ui.selectable_value(
                                             &mut self.source,
                                             option.to_string(),
@@ -704,7 +760,7 @@ impl KitVrApp {
                         });
                         field(&mut columns[1], "ENCODER", |ui| {
                             egui::ComboBox::from_id_salt("encoder")
-                                .selected_text(RichText::new(encoder).size(13.5).color(TEXT))
+                                .selected_text(RichText::new(encoder).size(13.5).color(p.text))
                                 .width(ui.available_width())
                                 .show_ui(ui, |ui| {
                                     for option in ENCODERS {
@@ -729,13 +785,19 @@ impl KitVrApp {
                             );
                         });
                     }
+                    if self.source == "SteamVR" {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(
+                            "Start SteamVR with the KitVR capture layer/driver first. The captured image must be side-by-side."
+                        ).size(11.5).color(p.muted));
+                    }
 
                     ui.add_space(8.0);
                     let resolution = self.resolution.clone();
                     ui.columns(2, |columns| {
                         field(&mut columns[0], "RESOLUTION", |ui| {
                             egui::ComboBox::from_id_salt("resolution")
-                                .selected_text(RichText::new(resolution).size(13.5).color(TEXT))
+                                .selected_text(RichText::new(resolution).size(13.5).color(p.text))
                                 .width(ui.available_width())
                                 .show_ui(ui, |ui| {
                                     for option in RESOLUTIONS {
@@ -752,7 +814,7 @@ impl KitVrApp {
                                 .selected_text(
                                     RichText::new(format!("{} fps", self.fps))
                                         .size(13.5)
-                                        .color(TEXT),
+                                        .color(p.text),
                                 )
                                 .width(ui.available_width())
                                 .show_ui(ui, |ui| {
@@ -778,7 +840,7 @@ impl KitVrApp {
                                 ))
                                 .size(13.0)
                                 .strong()
-                                .color(TEXT),
+                                .color(p.text),
                             );
                         });
                     });
@@ -819,7 +881,7 @@ impl KitVrApp {
                         };
                         field(ui, "AUDIO DEVICE", |ui| {
                             egui::ComboBox::from_id_salt("audio")
-                                .selected_text(RichText::new(selected_text).size(13.5).color(TEXT))
+                                .selected_text(RichText::new(selected_text).size(13.5).color(p.text))
                                 .width(ui.available_width())
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(
@@ -858,18 +920,35 @@ impl KitVrApp {
                         "Right hand moves; trigger or pinch clicks, grip right-clicks. Trusted networks only: connections are unauthenticated.",
                         &mut self.mouse_enabled,
                     );
+                    ui.add_space(8.0);
+                    option_row(
+                        ui,
+                        "Send tracking to desktop avatar",
+                        "Allows a local KitVR mascot to follow the headset and controllers. Trusted networks only.",
+                        &mut self.avatar_tracking,
+                    );
                 });
 
+                if ui.button("Open desktop avatar").clicked() {
+                    self.open_mascot();
+                }
+                ui.label(RichText::new(
+                    "Drop a permitted VRM file onto the avatar window. VRChat-only avatars cannot be imported directly."
+                ).size(11.5).color(p.muted));
+                ui.add_space(8.0);
+                ui.label(RichText::new(
+                    "Quest connections require the pairing key and use authenticated encryption. Keep the key private."
+                ).size(11.5).color(p.accent_text));
                 ui.add_space(14.0);
                 let (label, fill, border, text_color) = if running {
                     (
                         "Stop streaming",
                         Color32::from_rgba_unmultiplied(228, 115, 106, 26),
                         Color32::from_rgba_unmultiplied(228, 115, 106, 120),
-                        RED_TEXT,
+                        if p.light_surface { Color32::from_rgb(145, 35, 29) } else { RED_TEXT },
                     )
                 } else {
-                    ("Start streaming", AMBER, AMBER, AMBER_INK)
+                    ("Start streaming", p.accent, p.accent, p.accent_ink)
                 };
                 let button = egui::Button::new(RichText::new(label).size(15.0).strong().color(text_color))
                     .fill(fill)
@@ -889,22 +968,23 @@ impl KitVrApp {
                 } else {
                     "Test pattern needs no capture, so it is the quickest way to prove the link works."
                 };
-                ui.label(RichText::new(note).size(11.5).color(DIM));
+                ui.label(RichText::new(note).size(11.5).color(p.dim));
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new(
                         "Desktop capture uses gdigrab on Windows, x11grab on X11, and screen sharing via PipeWire and GStreamer on Wayland. On Wayland, choose a screen or window in the sharing dialog.",
                     )
                     .size(11.5)
-                    .color(DIM),
+                    .color(p.dim),
                 );
             });
     }
 
     fn connect_card(&mut self, ui: &mut egui::Ui, height: f32) {
+        let p = self.theme.palette();
         egui::Frame::default()
-            .fill(SURFACE)
-            .stroke(Stroke::new(1.0_f32, LINE))
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0_f32, p.line))
             .rounding(egui::Rounding::same(12.0))
             .inner_margin(egui::Margin::same(16.0))
             .show(ui, |ui| {
@@ -922,14 +1002,14 @@ impl KitVrApp {
 
                 let address = self.host_ip.clone();
                 egui::Frame::default()
-                    .fill(SUNKEN)
-                    .stroke(Stroke::new(1.0_f32, LINE))
+                    .fill(p.sunken)
+                    .stroke(Stroke::new(1.0_f32, p.line))
                     .rounding(egui::Rounding::same(10.0))
                     .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&address).monospace().size(21.0).color(TEXT));
+                            ui.label(RichText::new(&address).monospace().size(21.0).color(p.text));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui.button("Copy").clicked() {
                                     ui.output_mut(|output| output.copied_text = address.clone());
@@ -957,7 +1037,7 @@ impl KitVrApp {
                         "If this PC is missing in the headset list, check that both devices are on the same network and that TCP 9943 plus UDP 9944 are allowed through the firewall.",
                     )
                     .size(11.5)
-                    .color(DIM),
+                    .color(p.dim),
                 );
 
                 ui.add_space(12.0);
@@ -969,17 +1049,18 @@ impl KitVrApp {
                     "Mouse control is opt-in and unauthenticated",
                     "Audio is raw PCM, not compressed",
                 ] {
-                    ui.label(RichText::new(format!("- {line}")).size(11.5).color(MUTED));
+                    ui.label(RichText::new(format!("- {line}")).size(11.5).color(p.muted));
                 }
             });
     }
 
     fn console_panel(&mut self, ui: &mut egui::Ui) {
+        let p = self.theme.palette();
         let status = self.status.clone();
         ui.horizontal(|ui| {
             section_label(ui, "Server output");
             ui.add_space(4.0);
-            ui.label(RichText::new(status).size(11.5).color(MUTED));
+            ui.label(RichText::new(status).size(11.5).color(p.muted));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Clear").clicked() {
                     self.logs.clear();
@@ -1001,8 +1082,8 @@ impl KitVrApp {
         ui.add_space(8.0);
 
         egui::Frame::default()
-            .fill(SUNKEN)
-            .stroke(Stroke::new(1.0_f32, LINE))
+            .fill(p.sunken)
+            .stroke(Stroke::new(1.0_f32, p.line))
             .rounding(egui::Rounding::same(12.0))
             .inner_margin(egui::Margin::symmetric(14.0, 10.0))
             .show(ui, |ui| {
@@ -1018,7 +1099,7 @@ impl KitVrApp {
                         ui.label(
                             RichText::new("Server messages will appear here.")
                                 .size(11.5)
-                                .color(DIM),
+                                .color(p.dim),
                         );
                     }
                     for line in &self.logs {
@@ -1027,11 +1108,11 @@ impl KitVrApp {
                             || lower.contains("failed")
                             || lower.contains("could not")
                         {
-                            RED_TEXT
+                            if p.light_surface { Color32::from_rgb(145, 35, 29) } else { RED_TEXT }
                         } else if lower.contains("warn") {
-                            AMBER_TEXT
+                            p.accent_text
                         } else {
-                            Color32::from_rgb(147, 166, 165)
+                            p.muted
                         };
                         ui.label(RichText::new(line).monospace().size(11.5).color(color));
                     }
@@ -1040,6 +1121,7 @@ impl KitVrApp {
     }
 
     fn tutorial_window(&mut self, ctx: &egui::Context) {
+        let p = self.theme.palette();
         let mut open = self.tutorial_open;
         egui::Window::new("Welcome to KitVR")
             .id(egui::Id::new("kitvr_welcome"))
@@ -1053,7 +1135,7 @@ impl KitVrApp {
                     RichText::new(format!("Getting started  ·  {}/3", self.tutorial_step + 1))
                         .size(11.0)
                         .strong()
-                        .color(AMBER_TEXT),
+                        .color(p.accent_text),
                 );
                 ui.add_space(10.0);
                 match self.tutorial_step {
@@ -1116,43 +1198,53 @@ impl KitVrApp {
     }
 }
 
+fn ui_palette(ui: &egui::Ui) -> Palette {
+    ui.ctx()
+        .data(|data| data.get_temp(egui::Id::new("kitvr_palette")))
+        .unwrap_or_else(|| ThemeSettings::default().palette())
+}
+
 fn section_label(ui: &mut egui::Ui, text: &str) {
+    let p = ui_palette(ui);
     ui.label(
         RichText::new(text.to_uppercase())
             .size(10.5)
             .strong()
-            .color(MUTED),
+            .color(p.muted),
     );
 }
 
 fn tag(ui: &mut egui::Ui, text: &str) {
+    let p = ui_palette(ui);
     egui::Frame::default()
-        .fill(RAISED)
-        .stroke(Stroke::new(1.0_f32, LINE))
+        .fill(p.raised)
+        .stroke(Stroke::new(1.0_f32, p.line))
         .rounding(egui::Rounding::same(6.0))
         .inner_margin(egui::Margin::symmetric(8.0, 4.0))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).monospace().size(10.5).color(MUTED));
+            ui.label(RichText::new(text).monospace().size(10.5).color(p.muted));
         });
 }
 
 fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let p = ui_palette(ui);
     egui::Frame::default()
-        .fill(RAISED)
-        .stroke(Stroke::new(1.0_f32, LINE))
+        .fill(p.raised)
+        .stroke(Stroke::new(1.0_f32, p.line))
         .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::symmetric(10.0, 7.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(label).size(9.5).strong().color(DIM));
+            ui.label(RichText::new(label).size(9.5).strong().color(p.dim));
             add(ui);
         });
 }
 
 fn option_row(ui: &mut egui::Ui, title: &str, detail: &str, value: &mut bool) {
+    let p = ui_palette(ui);
     egui::Frame::default()
-        .fill(RAISED)
-        .stroke(Stroke::new(1.0_f32, LINE))
+        .fill(p.raised)
+        .stroke(Stroke::new(1.0_f32, p.line))
         .rounding(egui::Rounding::same(10.0))
         .inner_margin(egui::Margin::symmetric(14.0, 10.0))
         .show(ui, |ui| {
@@ -1160,8 +1252,8 @@ fn option_row(ui: &mut egui::Ui, title: &str, detail: &str, value: &mut bool) {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(RichText::new(title).size(13.0).color(TEXT));
-                    ui.label(RichText::new(detail).size(11.0).color(MUTED));
+                    ui.label(RichText::new(title).size(13.0).color(p.text));
+                    ui.label(RichText::new(detail).size(11.0).color(p.muted));
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     switch(ui, value);
@@ -1171,12 +1263,13 @@ fn option_row(ui: &mut egui::Ui, title: &str, detail: &str, value: &mut bool) {
 }
 
 fn switch(ui: &mut egui::Ui, value: &mut bool) {
+    let p = ui_palette(ui);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(40.0, 22.0), egui::Sense::click());
     if response.clicked() {
         *value = !*value;
     }
     let track = if *value {
-        AMBER
+        p.accent
     } else {
         Color32::from_rgb(51, 64, 63)
     };
@@ -1187,7 +1280,7 @@ fn switch(ui: &mut egui::Ui, value: &mut bool) {
         rect.left() + 11.0
     };
     let knob = if *value {
-        AMBER_INK
+        p.accent_ink
     } else {
         Color32::from_rgb(138, 153, 155)
     };
@@ -1196,28 +1289,29 @@ fn switch(ui: &mut egui::Ui, value: &mut bool) {
 }
 
 fn step_row(ui: &mut egui::Ui, number: u8, text: &str) {
+    let p = ui_palette(ui);
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(19.0, 19.0), egui::Sense::hover());
         let center = rect.center();
         ui.painter()
-            .circle_filled(center, 9.5, Color32::from_rgb(46, 37, 26));
+            .circle_filled(center, 9.5, p.badge);
         ui.painter().circle_stroke(
             center,
             9.5,
-            Stroke::new(1.0_f32, Color32::from_rgb(122, 88, 52)),
+            Stroke::new(1.0_f32, p.badge_line),
         );
         ui.painter().text(
             center,
             egui::Align2::CENTER_CENTER,
             number.to_string(),
             egui::FontId::proportional(11.0),
-            AMBER_TEXT,
+            p.accent_text,
         );
         ui.add(
             egui::Label::new(
                 RichText::new(text)
                     .size(12.5)
-                    .color(Color32::from_rgb(203, 214, 212)),
+                    .color(p.step_text),
             )
             .wrap(),
         );
@@ -1249,14 +1343,14 @@ fn pipe_logs<R: std::io::Read + Send + 'static>(pipe: R, sender: Sender<String>)
 }
 
 fn find_server_executable() -> Option<PathBuf> {
-    let name = if cfg!(windows) {
-        "kitvr-server.exe"
-    } else {
-        "kitvr-server"
-    };
+    find_executable("kitvr-server")
+}
+
+fn find_executable(base_name: &str) -> Option<PathBuf> {
+    let name = if cfg!(windows) { format!("{base_name}.exe") } else { base_name.to_string() };
     if let Some(path) = std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|dir| dir.join(name)))
+        .and_then(|path| path.parent().map(|dir| dir.join(&name)))
         .filter(|path| path.is_file())
     {
         return Some(path);
@@ -1264,7 +1358,7 @@ fn find_server_executable() -> Option<PathBuf> {
     std::env::var_os("PATH")?
         .to_string_lossy()
         .split(if cfg!(windows) { ';' } else { ':' })
-        .map(|dir| PathBuf::from(dir).join(name))
+        .map(|dir| PathBuf::from(dir).join(&name))
         .find(|path| path.is_file())
 }
 
@@ -1276,6 +1370,20 @@ fn local_ip() -> String {
         })
         .map(|address| address.ip().to_string())
         .unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+fn source_args(source: &str, file_path: &str) -> Vec<String> {
+    let value = match source {
+        "Desktop" => "desktop".to_string(),
+        "File" => format!("file:{}", file_path.trim()),
+        "SteamVR" => "steamvr".to_string(),
+        _ => "testpattern".to_string(),
+    };
+    let mut args = vec!["--source".to_string(), value];
+    if source == "SteamVR" {
+        args.push("--stereo-sbs".to_string());
+    }
+    args
 }
 
 fn parse_resolution(value: &str) -> (u32, u32) {
@@ -1396,6 +1504,67 @@ fn download_update(url: &str, asset_name: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn existing_settings_preserve_values_and_default_to_classic_theme() {
+        let settings: SavedSettings =
+            serde_json::from_str(r#"{"source":"SteamVR","fps":72}"#).unwrap();
+        assert_eq!(settings.source, "SteamVR");
+        assert_eq!(settings.fps, 72);
+        assert_eq!(settings.theme, ThemeSettings::default());
+    }
+
+    #[test]
+    fn settings_preserve_custom_theme() {
+        let mut settings = SavedSettings::default();
+        settings.theme.choice = ThemeChoice::Custom;
+        settings.theme.background = [10, 30, 50];
+        let saved = serde_json::to_string(&settings).unwrap();
+        let restored: SavedSettings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.theme, settings.theme);
+    }
+
+    #[test]
+    fn saving_the_app_persists_the_active_theme() {
+        #[derive(Default)]
+        struct TestStorage(std::collections::HashMap<String, String>);
+        impl eframe::Storage for TestStorage {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.to_owned(), value);
+            }
+            fn flush(&mut self) {}
+        }
+        let mut app = test_app();
+        app.theme.choice = ThemeChoice::Custom;
+        app.theme.accent = [7, 85, 145];
+        let mut storage = TestStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let saved: SavedSettings =
+            serde_json::from_str(&storage.0[SETTINGS_STORAGE_KEY]).unwrap();
+        assert_eq!(saved.theme, app.theme);
+    }
+
+    #[test]
+    fn custom_theme_window_renders() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.theme.choice = ThemeChoice::Custom;
+        app.theme_open = true;
+        ctx.set_visuals(app.theme.palette().visuals());
+        let output = ctx.run(egui::RawInput::default(), |ctx| app.theme_window(ctx));
+        assert!(app.theme_open);
+        assert!(!output.shapes.is_empty());
+    }
+
+    #[test]
+    fn steamvr_source_enables_stereo_without_changing_other_sources() {
+        assert_eq!(source_args("SteamVR", ""), ["--source", "steamvr", "--stereo-sbs"]);
+        assert_eq!(source_args("Desktop", ""), ["--source", "desktop"]);
+        assert_eq!(source_args("File", " movie.mp4 "), ["--source", "file:movie.mp4"]);
+    }
+
     fn test_app() -> KitVrApp {
         let (log_tx, log_rx) = mpsc::channel();
         let (_, update_rx) = mpsc::channel();
@@ -1413,6 +1582,7 @@ mod tests {
             audio_device: settings.audio_device,
             microphone_device: settings.microphone_device,
             mouse_enabled: false,
+            avatar_tracking: false,
             audio_devices: Vec::new(),
             child: None,
             log_tx,
@@ -1431,6 +1601,8 @@ mod tests {
             update_in_progress: false,
             console_open: true,
             autoscroll: true,
+            theme: settings.theme,
+            theme_open: false,
         }
     }
 

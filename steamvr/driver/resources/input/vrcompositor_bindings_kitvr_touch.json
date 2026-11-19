@@ -5,8 +5,8 @@
   "bindings": {
     "/actions/lasermouse": {
       "poses": [
-        { "output": "/actions/lasermouse/in/Pointer", "path": "/user/hand/left/pose/raw" },
-        { "output": "/actions/lasermouse/in/Pointer", "path": "/user/hand/right/pose/raw" }
+        { "output": "/actions/lasermouse/in/Pointer", "path": "/user/hand/left/pose/aim" },
+        { "output": "/actions/lasermouse/in/Pointer", "path": "/user/hand/right/pose/aim" }
       ],
       "sources": [
         {

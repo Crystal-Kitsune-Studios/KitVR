@@ -5,7 +5,7 @@
 //! stereo to the headset (5 ms per packet) and mono from the microphone.
 
 use std::collections::VecDeque;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kitvr_core::proto::audio::{build_packet, PACKET_TYPE_AUDIO_DOWN};
+use crate::bridge::PacketSender;
 
 #[cfg(windows)]
 mod wasapi;
@@ -106,9 +107,9 @@ impl Converter {
 }
 
 /// Captures `device` and sends 5 ms packets to `dest` until `stop` is set.
-pub fn run_downstream(
+pub fn run_downstream<S: PacketSender>(
     device: &str,
-    sock: &UdpSocket,
+    sock: &S,
     dest: SocketAddr,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), String> {
@@ -131,7 +132,7 @@ pub fn run_downstream(
                 while pending.len() >= frame_len {
                     let frame: Vec<i16> = pending.drain(..frame_len).collect();
                     let pkt = build_packet(PACKET_TYPE_AUDIO_DOWN, seq, t0.elapsed().as_micros() as u64, &frame);
-                    let _ = sock.send_to(&pkt, dest);
+                    let _ = sock.send_packet(&pkt, dest);
                     seq = seq.wrapping_add(1);
                 }
             }

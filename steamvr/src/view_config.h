@@ -16,6 +16,16 @@ struct EyeView {
     std::array<float, 7> eyeToHead;
 };
 
+inline std::array<float, 4> displayProjection(const std::array<float, 4>& projection) {
+#if defined(__linux__)
+    // The Linux compositor's captured output has the opposite vertical frustum asymmetry
+    // to OpenXR's upright surface presentation.
+    return {projection[0], projection[1], -projection[3], -projection[2]};
+#else
+    return projection;
+#endif
+}
+
 inline bool parseViewConfig(const uint8_t* packet, size_t size, std::array<EyeView, 2>& out) {
     if (size != kViewConfigPacketLength || packet[0] != kViewConfigPacketType || packet[1] != 1) {
         return false;

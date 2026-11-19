@@ -58,9 +58,11 @@ if(BUILD_TESTING)
             target_include_directories(kitvr_session_reconnect_test PRIVATE
                 ../quest/tests/stubs ../quest/app/src/main/cpp)
             target_link_libraries(kitvr_session_reconnect_test PRIVATE Threads::Threads)
-            target_link_options(kitvr_session_reconnect_test PRIVATE "-Wl,--wrap=send")
+            target_compile_definitions(kitvr_session_reconnect_test PRIVATE KITVR_CONNECT_TIMEOUT_MS=250)
+            target_link_options(kitvr_session_reconnect_test PRIVATE
+                "-Wl,--wrap=send" "-Wl,--wrap=connect" "-Wl,--wrap=poll")
             add_test(NAME kitvr_session_reconnect_test COMMAND kitvr_session_reconnect_test)
-            set_tests_properties(kitvr_session_reconnect_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 20)
+            set_tests_properties(kitvr_session_reconnect_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
             add_executable(kitvr_decoder_output_test
                 ../quest/tests/decoder_output_test.cpp ../quest/app/src/main/cpp/decoder.cpp)
             target_include_directories(kitvr_decoder_output_test PRIVATE

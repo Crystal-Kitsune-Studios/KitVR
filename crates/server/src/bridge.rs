@@ -9,12 +9,45 @@
 use std::io::{self, Read};
 use std::net::{SocketAddr, UdpSocket};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(target_os = "linux", windows))]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use kitvr_core::proto::video::{packetize_slice, SliceInfo};
-use kitvr_core::proto::MAX_PACKET_PAYLOAD;
+use kitvr_core::proto::{crypto, MAX_PACKET_PAYLOAD};
+
+pub trait PacketSender {
+    fn send_packet(&self, packet: &[u8], dest: SocketAddr) -> io::Result<usize>;
+}
+
+impl PacketSender for UdpSocket {
+    fn send_packet(&self, packet: &[u8], dest: SocketAddr) -> io::Result<usize> {
+        self.send_to(packet, dest)
+    }
+}
+
+pub struct SecureMediaSender {
+    socket: Arc<UdpSocket>,
+    key: [u8; 32],
+    next_sequence: AtomicU64,
+}
+
+impl SecureMediaSender {
+    pub fn new(socket: Arc<UdpSocket>, key: [u8; 32]) -> Self {
+        Self { socket, key, next_sequence: AtomicU64::new(0) }
+    }
+}
+
+impl PacketSender for SecureMediaSender {
+    fn send_packet(&self, packet: &[u8], dest: SocketAddr) -> io::Result<usize> {
+        let sequence = self
+            .next_sequence
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
+            .map_err(|_| io::Error::other("media sequence exhausted"))?;
+        let encrypted = crypto::seal_media_datagram(&self.key, sequence, packet)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        self.socket.send_to(&encrypted, dest)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Source {
@@ -58,7 +91,7 @@ impl Default for Settings {
             width: 1920,
             height: 1080,
             fps: 60,
-            bitrate_kbps: 40_000,
+            bitrate_kbps: 20_000,
             stereo_sbs: false,
             gop: 60,
         }
@@ -109,10 +142,11 @@ pub fn ffmpeg_args(s: &Settings) -> Vec<String> {
     }
 
     let mut vf = format!("scale={}:{},fps={}", s.width, s.height, s.fps);
-    // A captured framebuffer is already the right way up; only captured desktop frames are flipped.
-    #[cfg(any(target_os = "linux", windows))]
+    // The Quest surface needs the Linux compositor capture flipped, as with desktop capture.
+    // The Windows SteamVR capture path has not yet been verified on a headset.
+    #[cfg(windows)]
     let flip = !matches!(s.source, Source::SteamVr(_));
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(not(windows))]
     let flip = true;
     if flip {
         vf.push_str(",vflip");
@@ -234,11 +268,21 @@ pub fn is_keyframe(au: &[u8]) -> bool {
 /// Runs ffmpeg and streams its output to `dest` until `stop` is set or ffmpeg exits.
 pub fn run(
     settings: &Settings,
-    sock: &UdpSocket,
+    sock: &impl PacketSender,
     dest: SocketAddr,
     stop: &AtomicBool,
 ) -> io::Result<()> {
     let ffmpeg = std::env::var("KITVR_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
+    run_with_ffmpeg(settings, sock, dest, stop, &ffmpeg)
+}
+
+fn run_with_ffmpeg(
+    settings: &Settings,
+    sock: &impl PacketSender,
+    dest: SocketAddr,
+    stop: &AtomicBool,
+    ffmpeg: &str,
+) -> io::Result<()> {
     let args = ffmpeg_args(settings);
     println!("{} {}", ffmpeg, args.join(" "));
     let mut capture: Option<std::process::Child> = None;
@@ -276,7 +320,8 @@ pub fn run(
             return Err(error);
         }
     };
-    let mut out = child.stdout.take().expect("piped stdout");
+    let out = child.stdout.take().expect("piped stdout");
+    let (encoded_rx, reader) = spawn_encoded_reader(out);
 
     // The capture thread owns ffmpeg's stdin and stops when the ring goes quiet and `stop` is set,
     // or when ffmpeg exits and the pipe breaks.
@@ -289,34 +334,40 @@ pub fn run(
     };
 
     let mut splitter = AuSplitter::new();
-    let mut tmp = vec![0u8; 64 * 1024];
     let mut frame_id: u32 = 0;
     let mut result = Ok(());
+    let mut progress = EncoderProgress::new(std::time::Instant::now());
 
     'stream: while !stop.load(Ordering::Relaxed) {
-        #[cfg(target_os = "linux")]
-        if matches!(settings.source, Source::Wayland(_)) {
-            use std::os::fd::AsRawFd;
-            let mut fd = libc::pollfd { fd: out.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-            // Periodically check stop even if the portal or encoder stops producing frames.
-            let ready = unsafe { libc::poll(&mut fd, 1, 200) };
-            if ready == 0 { continue; }
-            if ready < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted { continue; }
-                result = Err(error);
+        let data = match encoded_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(Ok(data)) if data.is_empty() => {
+                if !stop.load(Ordering::Relaxed) {
+                    result = Err(io::Error::new(io::ErrorKind::UnexpectedEof, "video encoder output ended"));
+                }
                 break;
             }
-        }
-        let n = match out.read(&mut tmp) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => {
+            Ok(Ok(data)) => {
+                if progress.received(std::time::Instant::now()) {
+                    println!("video encoder output resumed");
+                }
+                data
+            }
+            Ok(Err(e)) => {
                 result = Err(e);
                 break;
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if progress.stalled(std::time::Instant::now()) {
+                    eprintln!("warning: no video from the encoder for 5 seconds; check the capture source and FFmpeg");
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                result = Err(io::Error::other("ffmpeg output reader stopped unexpectedly"));
+                break;
+            }
         };
-        for au in splitter.push(&tmp[..n]) {
+        for au in splitter.push(&data) {
             let info = SliceInfo {
                 frame_id,
                 slice_idx: 0,
@@ -325,7 +376,7 @@ pub fn run(
                 pose_timestamp_us: 0,
             };
             for p in packetize_slice(&info, &au, MAX_PACKET_PAYLOAD) {
-                if let Err(e) = sock.send_to(&p, dest) {
+                if let Err(e) = sock.send_packet(&p, dest) {
                     result = Err(e);
                     break 'stream;
                 }
@@ -343,6 +394,10 @@ pub fn run(
     }
     let _ = child.kill();
     let _ = child.wait();
+    drop(encoded_rx);
+    if reader.join().is_err() && result.is_ok() {
+        result = Err(io::Error::other("ffmpeg output reader panicked"));
+    }
     #[cfg(any(target_os = "linux", windows))]
     if let Some(handle) = feeder {
         let _ = handle.join();
@@ -354,6 +409,54 @@ pub fn run(
     result
 }
 
+struct EncoderProgress {
+    last_output: std::time::Instant,
+    warned: bool,
+}
+
+impl EncoderProgress {
+    fn new(now: std::time::Instant) -> Self {
+        Self { last_output: now, warned: false }
+    }
+
+    fn stalled(&mut self, now: std::time::Instant) -> bool {
+        if !self.warned && now.duration_since(self.last_output) >= std::time::Duration::from_secs(5) {
+            self.warned = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn received(&mut self, now: std::time::Instant) -> bool {
+        self.last_output = now;
+        std::mem::replace(&mut self.warned, false)
+    }
+}
+
+fn spawn_encoded_reader(
+    mut out: std::process::ChildStdout,
+) -> (
+    std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    std::thread::JoinHandle<()>,
+) {
+    let (tx, rx) = std::sync::mpsc::sync_channel(4);
+    let thread = std::thread::spawn(move || {
+        loop {
+            let mut data = vec![0u8; 64 * 1024];
+            let result = out.read(&mut data).map(|size| {
+                data.truncate(size);
+                data
+            });
+            let finished = result.as_ref().map_or(true, Vec::is_empty);
+            if tx.send(result).is_err() || finished {
+                break;
+            }
+        }
+    });
+    (rx, thread)
+}
+
 /// A raw pointer to the caller's stop flag. The feeder thread is always joined before `run`
 /// returns, so the reference outlives it.
 #[cfg(any(target_os = "linux", windows))]
@@ -363,6 +466,27 @@ struct StopFlag(*const AtomicBool);
 unsafe impl Send for StopFlag {}
 
 #[cfg(any(target_os = "linux", windows))]
+struct FramePacer {
+    interval: std::time::Duration,
+    next: std::time::Instant,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl FramePacer {
+    fn new(fps: u32, now: std::time::Instant) -> Self {
+        Self { interval: std::time::Duration::from_secs_f64(1.0 / fps.max(1) as f64), next: now }
+    }
+
+    fn remaining(&self, now: std::time::Instant) -> std::time::Duration {
+        self.next.saturating_duration_since(now)
+    }
+
+    fn sent(&mut self, now: std::time::Instant) {
+        self.next = now + self.interval;
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn spawn_ring_feeder(
     ring: Arc<crate::steamvr::SteamVrRing>,
     mut stdin: std::process::ChildStdin,
@@ -370,16 +494,29 @@ fn spawn_ring_feeder(
     stop: StopFlag,
 ) -> std::thread::JoinHandle<()> {
     use std::io::Write;
-    let interval = std::time::Duration::from_micros(1_000_000 / fps.max(1) as u64);
     std::thread::spawn(move || {
         // Capture the wrapper as a whole; a disjoint field capture would grab the raw pointer.
         let stop = stop;
         let mut frame = Vec::new();
+        let mut pacer = FramePacer::new(fps, std::time::Instant::now());
         while !unsafe { (*stop.0).load(Ordering::Relaxed) } {
-            if !ring.read_frame(&mut frame) {
-                std::thread::sleep(interval);
+            let wait = pacer.remaining(std::time::Instant::now());
+            if !wait.is_zero() {
+                std::thread::sleep(wait);
                 continue;
             }
+            match ring.read_frame(&mut frame) {
+                Ok(true) => {}
+                Ok(false) => {
+                    std::thread::sleep(pacer.interval);
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("could not read SteamVR frame ring: {error}");
+                    break;
+                }
+            }
+            pacer.sent(std::time::Instant::now());
             if stdin.write_all(&frame).is_err() {
                 break;
             }
@@ -440,6 +577,104 @@ fn start_wayland_capture(source: &crate::wayland::WaylandCapture, settings: &Set
 mod tests {
     use super::*;
 
+    #[test]
+    fn encoder_stall_is_reported_once_and_rearms_after_recovery() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let mut progress = EncoderProgress::new(start);
+        assert!(!progress.stalled(start + Duration::from_secs(4)));
+        assert!(progress.stalled(start + Duration::from_secs(5)));
+        assert!(!progress.stalled(start + Duration::from_secs(6)));
+        assert!(progress.received(start + Duration::from_secs(7)));
+        assert!(!progress.stalled(start + Duration::from_secs(11)));
+        assert!(progress.stalled(start + Duration::from_secs(12)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn encoder_exit_is_reported_to_the_session() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("kitvr-exit-encoder-{}", std::process::id()));
+        std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let result = run_with_ffmpeg(
+            &Settings::default(), &sock, "127.0.0.1:9944".parse().unwrap(),
+            &AtomicBool::new(false), path.to_str().unwrap(),
+        );
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stopping_a_silent_encoder_does_not_wait_for_it_to_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let path = std::env::temp_dir().join(format!("kitvr-silent-encoder-{}", std::process::id()));
+        std::fs::write(&path, "#!/bin/sh\nexec sleep 2\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                run_with_ffmpeg(
+                    &Settings::default(),
+                    &sock,
+                    "127.0.0.1:9944".parse().unwrap(),
+                    &stop,
+                    path.to_str().unwrap(),
+                )
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            stop.store(true, Ordering::Relaxed);
+            assert!(worker.join().unwrap().is_ok());
+        });
+        std::fs::remove_file(path).unwrap();
+        assert!(start.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn encoder_output_is_packetized_before_shutdown() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        let path = std::env::temp_dir().join(format!("kitvr-output-encoder-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '\\000\\000\\001\\106\\001\\000\\000\\001\\046\\001\\000\\000\\001\\106\\001'\nexec sleep 2\n",
+        ).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                run_with_ffmpeg(
+                    &Settings::default(), &sender, receiver.local_addr().unwrap(), &stop,
+                    path.to_str().unwrap(),
+                )
+            });
+            let mut buf = [0u8; 1024];
+            let received = receiver.recv(&mut buf);
+            stop.store(true, Ordering::Relaxed);
+            let result = worker.join().unwrap();
+            let (header, payload) = kitvr_core::proto::video::VideoHeader::parse(
+                &buf[..received.unwrap()]
+            ).unwrap();
+            assert_eq!(header.frame_id, 0);
+            assert_ne!(header.flags & kitvr_core::proto::video::flags::KEYFRAME, 0);
+            assert_eq!(payload, &[0, 0, 1, 70, 1, 0, 0, 1, 38, 1]);
+            assert!(result.is_ok());
+        });
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn access_unit(nal_type: u8, fill: u8, len: usize) -> Vec<u8> {
         let mut v = vec![0, 0, 0, 1, 35 << 1, 1]; // AUD, 4 byte start code
         v.extend_from_slice(&[0, 0, 1, nal_type << 1, 1]);
@@ -477,6 +712,90 @@ mod tests {
         assert!(args.contains(&"pipe:1".to_string()));
         assert!(args.contains(&"-an".to_string()));
         assert!(args.iter().any(|a| a.starts_with("testsrc2=size=1920x1080")));
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn steamvr_feeder_limits_rate_without_catchup_bursts() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let mut pacer = FramePacer::new(60, start);
+        assert_eq!(pacer.remaining(start), Duration::ZERO);
+        pacer.sent(start);
+        assert!(pacer.remaining(start + Duration::from_millis(11)) > Duration::ZERO);
+        assert_eq!(pacer.remaining(start + Duration::from_millis(17)), Duration::ZERO);
+        let delayed = start + Duration::from_secs(2);
+        pacer.sent(delayed);
+        assert!(pacer.remaining(delayed + Duration::from_millis(1)) > Duration::ZERO);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn steamvr_feeder_does_not_exceed_stream_fps() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{Duration, Instant};
+
+        let name = format!("kitvr-feeder-test-{}", std::process::id());
+        let path = std::path::Path::new("/dev/shm").join(&name);
+        let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        file.set_len(64).unwrap();
+        let base = unsafe {
+            libc::mmap(std::ptr::null_mut(), 64, libc::PROT_READ | libc::PROT_WRITE,
+                       libc::MAP_SHARED, file.as_raw_fd(), 0)
+        };
+        assert_ne!(base, libc::MAP_FAILED);
+        let base = base as *mut u8;
+        for (i, value) in [0x4B56_5246u32, 1, 2, 2, 0, 8, 16, 0].iter().enumerate() {
+            unsafe { std::ptr::write_unaligned(base.add(i * 4) as *mut u32, *value) };
+        }
+        let ring = crate::steamvr::SteamVrRing::open(&name).unwrap();
+        let mut child = Command::new("cat").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let stop = AtomicBool::new(false);
+        let feeder = spawn_ring_feeder(ring, child.stdin.take().unwrap(), 30, StopFlag(&stop));
+        let start = Instant::now();
+        let id = unsafe { &*(base.add(32) as *const AtomicU64) };
+        let mut next = 1u64;
+        while start.elapsed() < Duration::from_millis(600) {
+            id.store(next, Ordering::Release);
+            next += 1;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        stop.store(true, Ordering::Relaxed);
+        feeder.join().unwrap();
+        let elapsed = start.elapsed();
+        let mut output = Vec::new();
+        child.stdout.take().unwrap().read_to_end(&mut output).unwrap();
+        assert!(child.wait().unwrap().success());
+        unsafe { libc::munmap(base as *mut libc::c_void, 64) };
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(output.len() % 16, 0);
+        let frames = output.len() / 16;
+        assert!(frames >= 3, "only {frames} frames were fed");
+        assert!(frames as f64 <= 1.0 + elapsed.as_secs_f64() * 30.0,
+                "{frames} frames in {elapsed:?} exceeds 30 fps");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_steamvr_frames_are_flipped_for_the_quest_surface() {
+        use std::io::Write;
+
+        let name = format!("kitvr-bridge-flip-test-{}", std::process::id());
+        let path = std::path::Path::new("/dev/shm").join(&name);
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).unwrap();
+        let header = [0x4B56_5246u32, 1, 2, 2, 0, 8, 16, 0];
+        for value in header {
+            file.write_all(&value.to_le_bytes()).unwrap();
+        }
+        file.write_all(&[0; 32]).unwrap();
+        drop(file);
+        let ring = crate::steamvr::SteamVrRing::open(&name).unwrap();
+        let settings = Settings { source: Source::SteamVr(ring), ..Settings::default() };
+        let args = ffmpeg_args(&settings);
+        std::fs::remove_file(path).unwrap();
+        assert!(args.windows(2).any(|pair| pair[0] == "-vf" && pair[1].ends_with(",vflip")));
     }
 
     #[test]

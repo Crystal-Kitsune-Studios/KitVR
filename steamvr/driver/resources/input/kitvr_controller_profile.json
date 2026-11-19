@@ -13,7 +13,8 @@
     "/input/secondary": { "type": "button", "click": true, "order": 4 },
     "/input/menu": { "type": "button", "click": true, "order": 5 },
     "/input/joystick": { "type": "joystick", "click": true, "order": 6 },
-    "/pose/raw": { "type": "pose" }
+    "/pose/raw": { "type": "pose" },
+    "/pose/aim": { "type": "pose" }
   },
   "default_bindings": [
     {

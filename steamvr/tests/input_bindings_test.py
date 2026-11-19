@@ -37,6 +37,9 @@ class InputBindingsTest(unittest.TestCase):
 
     def test_dashboard_mouse_has_distinct_pinch_and_grip_actions(self):
         bindings = json.loads((INPUT / "vrcompositor_bindings_kitvr_touch.json").read_text())
+        poses = {pose["path"] for pose in bindings["bindings"]["/actions/lasermouse"]["poses"]}
+        for hand in ("left", "right"):
+            self.assertIn(f"/user/hand/{hand}/pose/aim", poses)
         sources = bindings["bindings"]["/actions/lasermouse"]["sources"]
         clicks = {
             source["path"]: source["inputs"]["click"]["output"]
