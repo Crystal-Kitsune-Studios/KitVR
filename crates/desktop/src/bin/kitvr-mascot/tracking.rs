@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use glam::{Quat, Vec3};
 use kitvr_proto::tracking::{
     BodyTracking, Hand, Pose, Tracking, BODY_TRACKING_LEN, PACKET_TYPE_BODY_TRACKING,
-    PACKET_TYPE_TRACKING, TRACKING_LEN,
+    PACKET_TYPE_TRACKING, TRACKING_AIM_LEN, TRACKING_LEN,
 };
 use kitvr_proto::AVATAR_TRACKING_PORT;
 
@@ -24,12 +24,17 @@ impl Feed {
     }
 
     pub fn poll(&mut self, now: Instant) -> io::Result<Option<Frame>> {
-        let mut bytes = [0; BODY_TRACKING_LEN + 1];
+        let mut bytes = [0; TRACKING_AIM_LEN + 1];
         for _ in 0..64 {
             match self.socket.recv_from(&mut bytes) {
                 Ok((length, sender)) if sender.ip().is_loopback() => {
                     match (length, bytes[0]) {
-                        (TRACKING_LEN, PACKET_TYPE_TRACKING) => {
+                        (TRACKING_LEN, PACKET_TYPE_TRACKING) if bytes[1] & 1 == 0 => {
+                            if let Ok(packet) = Tracking::parse(&bytes[..length]) {
+                                self.state.accept(packet, now);
+                            }
+                        }
+                        (TRACKING_AIM_LEN, PACKET_TYPE_TRACKING) if bytes[1] & 1 != 0 => {
                             if let Ok(packet) = Tracking::parse(&bytes[..length]) {
                                 self.state.accept(packet, now);
                             }
@@ -245,6 +250,27 @@ mod tests {
         sender.send_to(&[2, 0], address).unwrap();
         let mut bytes = Vec::new();
         packet(15).write_to(&mut bytes);
+        sender.send_to(&bytes, address).unwrap();
+        assert_eq!(feed.poll(Instant::now()).unwrap().unwrap().tracking.seq, 15);
+    }
+
+    #[test]
+    fn receives_quest_extended_tracking_and_rejects_truncated_or_oversized_packets() {
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut feed = Feed { socket, state: TrackingState::default() };
+        let sender = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        let mut bytes = Vec::new();
+        packet(15).write_to(&mut bytes);
+        bytes[1] = 1;
+        bytes.resize(TRACKING_AIM_LEN, 0);
+        sender.send_to(&bytes, address).unwrap();
+        assert_eq!(feed.poll(Instant::now()).unwrap().unwrap().tracking.seq, 15);
+
+        bytes[2..4].copy_from_slice(&16u16.to_le_bytes());
+        sender.send_to(&bytes[..TRACKING_LEN], address).unwrap();
+        bytes.push(0);
         sender.send_to(&bytes, address).unwrap();
         assert_eq!(feed.poll(Instant::now()).unwrap().unwrap().tracking.seq, 15);
     }

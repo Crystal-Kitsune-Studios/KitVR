@@ -17,6 +17,7 @@ use crate::DecodeError;
 
 pub const PACKET_TYPE_TRACKING: u8 = 2;
 pub const TRACKING_LEN: usize = 136;
+pub const TRACKING_AIM_LEN: usize = TRACKING_LEN + 2 * 28;
 pub const PACKET_TYPE_BODY_TRACKING: u8 = 5;
 pub const BODY_TRACKING_JOINTS: usize = 6;
 pub const BODY_TRACKING_LEN: usize = 16 + BODY_TRACKING_JOINTS * 28;

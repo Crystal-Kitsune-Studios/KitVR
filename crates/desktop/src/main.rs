@@ -917,7 +917,7 @@ impl KitVrApp {
                     option_row(
                         ui,
                         "Enable hand/controller mouse",
-                        "Right hand moves; trigger or pinch clicks, grip right-clicks. Trusted networks only: connections are unauthenticated.",
+                        "Right hand moves; trigger or pinch clicks, grip right-clicks. Requires a paired connection.",
                         &mut self.mouse_enabled,
                     );
                     ui.add_space(8.0);
@@ -1046,7 +1046,7 @@ impl KitVrApp {
                 for line in [
                     "About one extra frame of latency",
                     "Fixed GOP, keyframe requests are not honored",
-                    "Mouse control is opt-in and unauthenticated",
+                    "Mouse control is opt-in and requires pairing",
                     "Audio is raw PCM, not compressed",
                 ] {
                     ui.label(RichText::new(format!("- {line}")).size(11.5).color(p.muted));

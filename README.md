@@ -191,7 +191,7 @@ them with the KitVR packets. It works on both OSes with one code path. Known cos
 - About one extra frame of latency, because a frame is only known to be complete when the next begins.
 - Keyframe requests cannot be honored. The stream uses a fixed GOP (`--gop`, default 60 frames),
   so recovery after packet loss takes up to one second.
-- Mouse control is opt-in and unauthenticated. Audio is raw PCM, not compressed.
+- Mouse control is opt-in and requires pairing. Audio is raw PCM, not compressed.
 
 Replacing the bridge with the native backends in `crates/server/src/platform/` removes these.
 
